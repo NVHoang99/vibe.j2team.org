@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { RouterLink } from 'vue-router'
 import { REPO_URL } from '@/data/constants'
 </script>
 
@@ -46,6 +47,12 @@ import { REPO_URL } from '@/data/constants'
       >
         Tham gia ngay
       </a>
+      <RouterLink
+        to="/leaderboard"
+        class="inline-block border border-accent-sky bg-accent-sky/10 px-6 py-3 font-display font-semibold text-accent-sky tracking-wide transition-all duration-300 hover:bg-accent-sky hover:text-bg-deep"
+      >
+        Top đóng góp
+      </RouterLink>
       <a :href="REPO_URL" target="_blank" rel="noopener noreferrer nofollow">
         <img
           alt="GitHub Repo stars"
