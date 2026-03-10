@@ -152,11 +152,13 @@ function reportIssue() {
         <!-- Bookmark -->
         <button
           class="toolbar-btn group"
-          :class="[favorited && 'text-accent-coral', isAnimating && 'is-animating']"
+          :class="favorited && 'text-accent-coral'"
           :title="favorited ? 'Bỏ yêu thích' : 'Thêm yêu thích'"
           @click="handleFavorite"
         >
-          <Icon icon="lucide:heart" class="w-5 h-5" :class="favorited && 'icon-filled'" />
+          <span class="relative" :class="isAnimating && 'is-animating'">
+            <Icon icon="lucide:heart" class="w-5 h-5" :class="favorited && 'icon-filled'" />
+          </span>
           <span class="toolbar-label font-display tracking-wide">{{
             favorited ? 'Đã thích' : 'Yêu thích'
           }}</span>
