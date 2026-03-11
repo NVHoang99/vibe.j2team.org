@@ -183,6 +183,45 @@ Simple apps (just a single page) only need `index.vue` + `meta.ts`.
 - `src/views/<app-name>/assets/` — images, sounds, CSS that Vite will hash and optimize. **Use this for most cases.**
 - `public/<app-name>/` — large media files (videos, large image sets) served as-is without Vite processing. Accessible at `/<app-name>/filename.ext`.
 
+### Bundle Size — Avoid bloating JS chunks
+
+Vite/Rollup bundles **everything that is `import`ed** into JS chunks. The following patterns bloat the bundle and **must be avoided**:
+
+**DO NOT — Export large data as a TypeScript/JS module:**
+```ts
+// Whether static or dynamic import — Rollup still creates a JS chunk
+export const wordList = { ... } // 500 kB
+const mod = await import('./data') // still a JS chunk
+```
+
+**DO — Replace with JSON in `public/data/` + lazy fetch:**
+```ts
+// Bypasses Rollup entirely, browser caches it independently
+const response = await fetch('/data/my-app-data.json')
+const data = await response.json()
+```
+
+**DO NOT — Import a compiled engine (.js Emscripten/WASM) via `?url`:**
+```ts
+import engineUrl from './engine.js?url' // Vite still copies it to dist/assets/, triggers warning
+```
+
+**DO — Place in `public/<app-name>/` and use a hardcoded URL:**
+```ts
+const engineUrl = '/my-app/engine.js' // Rollup never touches it
+```
+
+**Size thresholds:**
+
+| Data type | Threshold | Recommendation |
+|-----------|-----------|----------------|
+| Dictionary / word list | > 50 kB | `public/data/*.json` + fetch |
+| Geo / SVG path data | > 50 kB | `public/data/*.json` + fetch |
+| Compiled engine (Emscripten, asm.js) | any size | `public/<app>/` + hardcoded URL |
+| Config / small data | < 20 kB | Direct import is fine |
+
+After building, run `pnpm build` and verify there are no `(!) Some chunks are larger than 500 kB` warnings.
+
 ### Shared Utilities (opt-in)
 
 Reusable code used by 3+ apps can live in the shared layer:
@@ -274,6 +313,7 @@ Default is `true` — the toolbar is shown unless explicitly disabled.
 6. **UTF-8 encoding** — Ensure all Vietnamese text is properly encoded in UTF-8 (no garbled characters)
 7. **Follow `meta.ts` structure** — Copy the pattern from `src/views/hello-world/meta.ts` exactly. Import `PageMeta` type, export default with required fields
 8. **No exposed API endpoints/secrets** — Since this is open source, never hard-code API keys, endpoints, or secrets in the source code
+9. **No large data files in `src/`** — If your app needs a large data file (> 50 kB), place it in `public/data/` as JSON and fetch it lazily. Do NOT export it as a TypeScript/JS module. See "Bundle Size — Avoid bloating JS chunks" section above
 
 ## Linting & Formatting
 
