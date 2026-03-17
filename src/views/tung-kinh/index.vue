@@ -2,9 +2,9 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useLocalStorage, useIntervalFn } from '@vueuse/core'
-import bgImage from './assets/bg_home1.jpg'
-import bonkImage from './assets/bonk.png'
-import bonkSound from './assets/audio-bonk.mp3'
+const bgImage = '/tung-kinh/bg_home1.webp'
+const bonkImage = '/tung-kinh/bonk.webp'
+const bonkSound = '/tung-kinh/audio-bonk.mp3'
 
 // Nhạc nền gọi qua URL — thay bằng bất kỳ URL audio công khai nào cũng được
 const BEAT_URL = 'https://storage.wizlab.io.vn/sop/beat-background.mp3'
