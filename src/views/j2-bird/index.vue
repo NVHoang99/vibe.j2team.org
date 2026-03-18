@@ -46,7 +46,7 @@ let birdImgReady = false
 function loadBirdImage(): Promise<void> {
   return new Promise((resolve) => {
     const img = new Image()
-    img.src = '/images/j2-bird/logo.png'
+    img.src = '/j2-bird/logo.png'
     img.onload = () => {
       birdImg = img
       birdImgReady = true

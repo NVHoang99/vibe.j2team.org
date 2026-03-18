@@ -24,12 +24,12 @@ const DICE_MAP: Record<DiceIndex, DiceFace> = {
 }
 
 const SYMBOL_IMAGES: Record<DiceFace, string> = {
-  bầu: '/images/bau-cua-tom-ca/bau.webp',
-  cua: '/images/bau-cua-tom-ca/cua.webp',
-  tôm: '/images/bau-cua-tom-ca/tom.webp',
-  cá: '/images/bau-cua-tom-ca/ca.webp',
-  gà: '/images/bau-cua-tom-ca/ga.webp',
-  nai: '/images/bau-cua-tom-ca/nai.webp',
+  bầu: '/bau-cua-tom-ca/bau.webp',
+  cua: '/bau-cua-tom-ca/cua.webp',
+  tôm: '/bau-cua-tom-ca/tom.webp',
+  cá: '/bau-cua-tom-ca/ca.webp',
+  gà: '/bau-cua-tom-ca/ga.webp',
+  nai: '/bau-cua-tom-ca/nai.webp',
 }
 
 const SYMBOL_EMOJIS: Record<DiceFace, string> = {

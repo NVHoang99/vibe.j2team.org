@@ -201,7 +201,11 @@ Simple apps (just a single page) only need `index.vue` + `meta.ts`.
 ### Static Assets Convention
 
 - `src/views/<app-name>/assets/` — small images, sounds, CSS that Vite will hash and optimize. **Use this for small assets (< 50 kB total).**
-- `public/<app-name>/` — large or numerous assets (sprite sheets, image sets, audio files, videos) served as-is without Vite processing. Accessible at `/<app-name>/filename.ext`. **You are allowed and encouraged to create `public/<app-name>/` directories** — this is NOT limited to your `src/views/` folder.
+- `public/<app-name>/` — large or numerous assets (sprite sheets, image sets, audio files, videos, JSON data) served as-is without Vite processing. Accessible at `/<app-name>/filename.ext`. **You are allowed and encouraged to create `public/<app-name>/` directories** — this is NOT limited to your `src/views/` folder.
+- `public/shared/` — assets used by multiple apps (e.g. `noise.webp`, `web-logo.svg`). Accessible at `/shared/filename.ext`.
+- `public/data/pages.json` — auto-generated app registry (globally shared). **Do NOT place app-specific data here** — use `public/<app-name>/` instead.
+
+**Important:** All app-specific public assets (images, sounds, data files) go in `public/<app-name>/`. Do NOT use `public/images/`, `public/sounds/`, or `public/data/` for app-specific assets.
 
 **Why use `public/`?** Assets imported via `import` or `import.meta.glob` in `src/` get bundled into JS chunks, increasing initial page load. Files in `public/` are served as static files and loaded on demand by the browser.
 
@@ -216,10 +220,10 @@ export const wordList = { ... } // 500 kB
 const mod = await import('./data') // still a JS chunk
 ```
 
-**DO — Replace with JSON in `public/data/` + lazy fetch:**
+**DO — Replace with JSON in `public/<app-name>/` + lazy fetch:**
 ```ts
 // Bypasses Rollup entirely, browser caches it independently
-const response = await fetch('/data/my-app-data.json')
+const response = await fetch('/my-app/my-app-data.json')
 const data = await response.json()
 ```
 
@@ -237,8 +241,8 @@ const engineUrl = '/my-app/engine.js' // Rollup never touches it
 
 | Data type | Threshold | Recommendation |
 |-----------|-----------|----------------|
-| Dictionary / word list | > 50 kB | `public/data/*.json` + fetch |
-| Geo / SVG path data | > 50 kB | `public/data/*.json` + fetch |
+| Dictionary / word list | > 50 kB | `public/<app>/data.json` + fetch |
+| Geo / SVG path data | > 50 kB | `public/<app>/data.json` + fetch |
 | Sprite frames / image sets | > 10 files or > 50 kB total | `public/<app>/` + URL strings |
 | Compiled engine (Emscripten, asm.js) | any size | `public/<app>/` + hardcoded URL |
 | Config / small data | < 20 kB | Direct import is fine |
@@ -336,7 +340,7 @@ Default is `true` — the toolbar is shown unless explicitly disabled.
 6. **UTF-8 encoding** — Ensure all Vietnamese text is properly encoded in UTF-8 (no garbled characters)
 7. **Follow `meta.ts` structure** — Copy the pattern from `src/views/hello-world/meta.ts` exactly. Import `PageMeta` type, export default with required fields
 8. **No exposed API endpoints/secrets** — Since this is open source, never hard-code API keys, endpoints, or secrets in the source code
-9. **No large data files in `src/`** — If your app needs a large data file (> 50 kB), place it in `public/data/` as JSON and fetch it lazily. Do NOT export it as a TypeScript/JS module. See "Bundle Size — Avoid bloating JS chunks" section above
+9. **No large data files in `src/`** — If your app needs a large data file (> 50 kB), place it in `public/<app-name>/` as JSON and fetch it lazily. Do NOT export it as a TypeScript/JS module. See "Bundle Size — Avoid bloating JS chunks" section above
 10. **Clean up side effects on unmount** — Every `addEventListener`, `setInterval`, `setTimeout`, `requestAnimationFrame`, or any other global side effect registered in `onMounted` MUST be cleaned up in `onUnmounted`. Prefer VueUse composables (`useEventListener`, `useIntervalFn`, `useTimeoutFn`, `useRafFn`) which handle cleanup automatically. Forgetting cleanup causes memory leaks and ghost listeners that persist across route navigations in an SPA
 
 ## Linting & Formatting
