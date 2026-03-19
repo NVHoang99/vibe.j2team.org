@@ -29,7 +29,7 @@ describe('allAuthors — single author, single page', () => {
         facebook: 'alice.fb',
       }),
     ])
-    allAuthors = mod.allAuthors
+    allAuthors = mod.getAllAuthors()
     toAuthorSlug = mod.toAuthorSlug
   })
 
@@ -73,7 +73,7 @@ describe('allAuthors — same author, multiple pages', () => {
       }),
       makePageInfo({ path: '/a3', name: 'A3', author: 'Bob', category: 'game' }),
     ])
-    allAuthors = mod.allAuthors
+    allAuthors = mod.getAllAuthors()
   })
 
   it('aggregates apps under one author', () => {
@@ -100,7 +100,7 @@ describe('allAuthors — multiple authors', () => {
       makePageInfo({ path: '/x1', name: 'X1', author: 'Alice' }),
       makePageInfo({ path: '/x2', name: 'X2', author: 'Bob' }),
     ])
-    allAuthors = mod.allAuthors
+    allAuthors = mod.getAllAuthors()
   })
 
   it('creates separate entries per author', () => {
@@ -128,7 +128,7 @@ describe('multiAppAuthors ranking', () => {
       // Dave: 1 app (should be filtered out)
       makePageInfo({ path: '/d1', name: 'D1', author: 'Dave' }),
     ])
-    multiAppAuthors = mod.multiAppAuthors
+    multiAppAuthors = mod.getMultiAppAuthors()
   })
 
   it('filters out authors with fewer than 2 apps', () => {
