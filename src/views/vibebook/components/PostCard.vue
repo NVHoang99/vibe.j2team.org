@@ -21,7 +21,7 @@ const emit = defineEmits<{
 
 const router = useRouter()
 
-const { avatarUrl, avatarColor, initial } = useGithubAvatar(props.page.author)
+const { avatarUrl, avatarColor, initial, onAvatarError } = useGithubAvatar(props.page.author)
 
 const categoryLabel = computed(() => getCategoryLabel(props.page.category))
 
@@ -82,6 +82,7 @@ onUnmounted(() => {
           :alt="page.author"
           class="w-10 h-10 rounded-full object-cover hover:ring-2 hover:ring-accent-coral"
           loading="lazy"
+          @error="onAvatarError"
         />
         <div
           v-else
