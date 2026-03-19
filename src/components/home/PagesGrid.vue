@@ -1,14 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, onBeforeUnmount, type Directive } from 'vue'
-import { refDebounced } from '@vueuse/core'
 import { RouterLink, useRouter } from 'vue-router'
 import { Icon } from '@iconify/vue'
 import { usePagesStore } from '@/stores/usePagesStore'
-import type { PageInfo } from '@/types/page'
 import { padIndex } from '@/data/homepage'
-import { categories, type CategoryId } from '@/data/categories'
-import { normalize } from '@/utils/text'
+import { categories } from '@/data/categories'
 import { useSearchShortcut } from '@/composables/useSearchShortcut'
+import { useFilteredList } from '@/composables/useFilteredList'
 import PageCard from '@/components/PageCard.vue'
 import CategoryFilter from '@/components/CategoryFilter.vue'
 import { useFavoritesStore } from '@/stores/useFavoritesStore'
@@ -44,65 +42,20 @@ const vAnimate: Directive<HTMLElement, string | undefined> = {
   },
 }
 
-const searchQuery = ref('')
-const debouncedQuery = refDebounced(searchQuery, 300)
-const activeCategory = ref<CategoryId | null>(null)
-
 const showAll = ref(false)
 
-const isFiltering = computed(() => {
-  return searchQuery.value.trim() !== '' || activeCategory.value !== null
+const { searchQuery, activeCategory, isFiltering, filteredList, categoryCounts } = useFilteredList({
+  items: () => pagesStore.pages,
+  searchFields: ['name', 'description', 'author'],
+  categoryField: 'category',
+})
+
+const filteredPages = computed(() => {
+  if (isFiltering.value || showAll.value) return filteredList.value
+  return filteredList.value.filter((p) => p.featured)
 })
 
 const hiddenCount = computed(() => pagesStore.pages.length - pagesStore.featuredPages.length)
-
-// Pre-normalize once at module load — avoids re-running NFD + regex on every search/filter change
-type NormalizedPage = PageInfo & { _name: string; _desc: string; _author: string }
-
-function toNormalized(p: PageInfo): NormalizedPage {
-  return {
-    ...p,
-    _name: normalize(p.name),
-    _desc: normalize(p.description),
-    _author: normalize(p.author),
-  }
-}
-
-const normalizedPages = computed(() => pagesStore.pages.map(toNormalized))
-const normalizedFeaturedPages = computed(() => pagesStore.featuredPages.map(toNormalized))
-
-const searchablePages = computed<NormalizedPage[]>(() =>
-  isFiltering.value || showAll.value ? normalizedPages.value : normalizedFeaturedPages.value,
-)
-
-const filteredPages = computed(() => {
-  const query = normalize(debouncedQuery.value.trim())
-  const category = activeCategory.value
-
-  return searchablePages.value.filter((page) => {
-    if (category) {
-      if (page.category !== category) return false
-    }
-
-    if (query) {
-      return (
-        page._name.includes(query) || page._desc.includes(query) || page._author.includes(query)
-      )
-    }
-
-    return true
-  })
-})
-
-const categoryCounts = computed(() => {
-  const counts: Partial<Record<CategoryId, number>> = {}
-  for (const page of pagesStore.pages) {
-    if (page.category) {
-      counts[page.category] = (counts[page.category] || 0) + 1
-    }
-  }
-  return counts
-})
 
 const activeCategoryObj = computed(
   () => categories.find((c) => c.id === activeCategory.value) ?? null,

@@ -6,7 +6,7 @@ import { Icon } from '@iconify/vue'
 import { getAllAuthors, toAuthorSlug } from '@/data/authors'
 import { getCategoryLabel } from '@/data/categories'
 import { useSearchShortcut } from '@/composables/useSearchShortcut'
-import { normalize } from '@/utils/text'
+import { useFilteredList } from '@/composables/useFilteredList'
 import AppBreadcrumb from '@/components/AppBreadcrumb.vue'
 import AuthorAvatar from '@/components/AuthorAvatar.vue'
 
@@ -17,7 +17,12 @@ useSeoMeta({
   ogDescription: 'Danh sách tất cả thành viên đóng góp trên vibe.j2team.org.',
 })
 
-const search = ref('')
+const { searchQuery: search, filteredList: filteredBySearch } = useFilteredList({
+  items: () => Array.from(getAllAuthors().values()),
+  searchFields: ['author'],
+  debounce: 0,
+})
+
 const searchInputRef = useTemplateRef<HTMLInputElement>('searchInput')
 useSearchShortcut(searchInputRef)
 
@@ -44,13 +49,10 @@ const sortIcons: Record<SortMode, [string, string]> = {
   name: ['lucide:arrow-down-a-z', 'lucide:arrow-up-z-a'],
 }
 
-const allMembers = computed(() => Array.from(getAllAuthors().values()))
+const totalMembers = getAllAuthors().size
 
 const filteredMembers = computed(() => {
-  const q = normalize(search.value.trim())
-  const list = q
-    ? allMembers.value.filter((m) => normalize(m.author).includes(q))
-    : [...allMembers.value]
+  const list = [...filteredBySearch.value]
   const dir = sortAsc.value ? -1 : 1
 
   if (sortBy.value === 'name') {
@@ -79,7 +81,7 @@ const filteredMembers = computed(() => {
         Thành viên
       </h1>
       <p class="mt-4 text-text-secondary">
-        {{ allMembers.length }} thành viên đã đóng góp ứng dụng trên vibe.j2team.org
+        {{ totalMembers }} thành viên đã đóng góp ứng dụng trên vibe.j2team.org
       </p>
 
       <!-- Search & Sort -->

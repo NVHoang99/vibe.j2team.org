@@ -2,13 +2,10 @@
 import { computed, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { storeToRefs } from 'pinia'
-import { refDebounced } from '@vueuse/core'
 import { Icon } from '@iconify/vue'
 import { usePagesStore } from '@/stores/usePagesStore'
-import type { PageInfo } from '@/types/page'
-import type { CategoryId } from '@/data/categories'
-import { normalize } from '@/utils/text'
 import { useSearchShortcut } from '@/composables/useSearchShortcut'
+import { useFilteredList } from '@/composables/useFilteredList'
 import { useFavoritesStore } from '@/stores/useFavoritesStore'
 import { useRecentlyViewedStore } from '@/stores/useRecentlyViewedStore'
 import { useDraggable } from '@/composables/useDraggable'
@@ -41,52 +38,19 @@ const bookmarkedPages = computed(() => {
 
 // --- Search & Category Filter ---
 
-const searchQuery = ref('')
-const debouncedQuery = refDebounced(searchQuery, 300)
-const activeCategory = ref<CategoryId | null>(null)
+const {
+  searchQuery,
+  activeCategory,
+  isFiltering,
+  filteredList: filteredBookmarks,
+  categoryCounts: bookmarkCategoryCounts,
+} = useFilteredList({
+  items: bookmarkedPages,
+  searchFields: ['name', 'description', 'author'],
+  categoryField: 'category',
+})
+
 const categoryFilterRef = ref<InstanceType<typeof CategoryFilter> | null>(null)
-
-const isFiltering = computed(() => {
-  return searchQuery.value.trim() !== '' || activeCategory.value !== null
-})
-
-const bookmarkCategoryCounts = computed(() => {
-  const counts: Partial<Record<CategoryId, number>> = {}
-  for (const page of bookmarkedPages.value) {
-    if (page.category) {
-      counts[page.category] = (counts[page.category] || 0) + 1
-    }
-  }
-  return counts
-})
-
-// Pre-normalize once so normalize() doesn't re-run on every search/filter change
-type NormalizedPage = PageInfo & { _name: string; _desc: string; _author: string }
-
-const normalizedBookmarks = computed<NormalizedPage[]>(() =>
-  bookmarkedPages.value.map((p) => ({
-    ...p,
-    _name: normalize(p.name),
-    _desc: normalize(p.description),
-    _author: normalize(p.author),
-  })),
-)
-
-const filteredBookmarks = computed(() => {
-  const query = normalize(debouncedQuery.value.trim())
-  const category = activeCategory.value
-
-  return normalizedBookmarks.value.filter((page) => {
-    if (category && page.category !== category) return false
-    if (query) {
-      return (
-        page._name.includes(query) || page._desc.includes(query) || page._author.includes(query)
-      )
-    }
-    return true
-  })
-})
-
 const searchInputRef = computed(() => categoryFilterRef.value?.searchInputRef ?? null)
 
 useSearchShortcut(searchInputRef)
