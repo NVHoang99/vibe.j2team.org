@@ -5,6 +5,7 @@ import { useHead, useSeoMeta } from '@unhead/vue'
 import { Icon } from '@iconify/vue'
 import { getAuthorBySlug } from '@/data/authors'
 import { getCategoryLabel } from '@/data/categories'
+import { getAuthorBadges, getCategoryBreakdown } from '@/data/badges'
 import FavoriteButton from '@/components/FavoriteButton.vue'
 
 const route = useRoute()
@@ -41,6 +42,9 @@ const rankStyle = computed(() => {
   if (!author.value?.rank) return defaultRankStyle
   return rankStyles[author.value.rank] ?? defaultRankStyle
 })
+
+const badges = computed(() => (author.value ? getAuthorBadges(author.value) : []))
+const categoryBreakdown = computed(() => (author.value ? getCategoryBreakdown(author.value) : []))
 </script>
 
 <template>
@@ -106,25 +110,54 @@ const rankStyle = computed(() => {
           </a>
         </div>
 
-        <!-- Stats bar -->
-        <div class="mt-8 flex flex-wrap gap-6 text-sm border-t border-border-default pt-6">
-          <div>
+        <!-- Badges -->
+        <div v-if="badges.length" class="mt-6 flex flex-wrap gap-2">
+          <span
+            v-for="badge in badges"
+            :key="badge.id"
+            :title="badge.description"
+            class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-bg-elevated border border-border-default text-xs font-display tracking-wide text-text-secondary transition hover:border-accent-coral hover:text-accent-coral"
+          >
+            <Icon :icon="badge.icon" class="w-3.5 h-3.5" />
+            {{ badge.label }}
+          </span>
+        </div>
+
+        <!-- Stats & Category breakdown -->
+        <div class="mt-8 border-t border-border-default pt-6">
+          <div class="flex items-baseline gap-2">
             <span
-              class="font-display text-2xl font-bold"
+              class="font-display text-3xl font-bold"
               :class="author.rank ? rankStyle.text : 'text-accent-coral'"
             >
               {{ author.apps.length }}
             </span>
-            <span class="ml-1.5 text-text-secondary">ứng dụng</span>
-          </div>
-          <div v-if="author.categories.length" class="flex flex-wrap items-center gap-1.5">
-            <span
-              v-for="cat in author.categories"
-              :key="cat"
-              class="text-[10px] px-1.5 py-0.5 bg-bg-elevated text-text-dim font-display tracking-wide"
-            >
-              {{ getCategoryLabel(cat) }}
+            <span class="text-sm text-text-secondary">ứng dụng</span>
+            <span v-if="categoryBreakdown.length > 1" class="text-text-dim text-sm">
+              · {{ categoryBreakdown.length }} thể loại
             </span>
+          </div>
+
+          <div v-if="categoryBreakdown.length" class="mt-5 space-y-2.5">
+            <div
+              v-for="cat in categoryBreakdown"
+              :key="cat.id"
+              class="flex items-center gap-3 text-sm"
+            >
+              <Icon :icon="cat.icon" class="w-4 h-4 text-text-dim shrink-0" />
+              <span
+                class="w-28 sm:w-36 truncate text-text-secondary font-display text-xs tracking-wide"
+              >
+                {{ cat.label }}
+              </span>
+              <div class="flex-1 h-1.5 bg-bg-elevated rounded-full overflow-hidden">
+                <div
+                  class="h-full bg-accent-coral/70 rounded-full transition-all duration-500"
+                  :style="{ width: `${(cat.count / author.apps.length) * 100}%` }"
+                />
+              </div>
+              <span class="text-text-dim font-display text-xs w-6 text-right">{{ cat.count }}</span>
+            </div>
           </div>
         </div>
 
