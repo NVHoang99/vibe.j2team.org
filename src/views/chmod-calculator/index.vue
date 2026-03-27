@@ -227,10 +227,9 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, computed, ref, watchEffect } from 'vue'
+import { reactive, computed, ref } from 'vue'
 import { Icon } from '@iconify/vue'
 import { useClipboard } from '@vueuse/core'
-import { codeToHtml } from 'shiki'
 
 import AboutCard from './AboutCard.vue'
 import AuthorCard from './AuthorCard.vue'
@@ -304,40 +303,6 @@ const commandText = computed<string>(() => {
   return `${prefix}chmod ${numericResult.value} ${targetPath}`
 })
 
-// 5. Clipboard & Shiki
+// 5. Clipboard
 const { copy, copied, isSupported } = useClipboard({ source: commandText })
-
-const shikiHtml = ref<string>('')
-
-watchEffect(async () => {
-  // Đảm bảo chạy mượt mà bằng cách gán kết quả highlight vào ref
-  try {
-    shikiHtml.value = await codeToHtml(commandText.value, {
-      lang: 'bash',
-      theme: 'poimandres',
-    })
-  } catch (e) {
-    console.error('Shiki highlight error:', e)
-    // Fallback nếu Shiki lỗi
-    shikiHtml.value = commandText.value
-  }
-})
 </script>
-
-<style>
-/* Đảm bảo khung code hiển thị mượt trên mobile */
-.shiki-container pre {
-  margin: 0 !important;
-  background: transparent !important;
-  padding: 0 !important;
-  -ms-overflow-style: none;
-  /* IE and Edge */
-  scrollbar-width: none;
-  /* Firefox */
-}
-
-/* Ẩn thanh cuộn của code block cho đẹp mắt trên mobile */
-.shiki-container::-webkit-scrollbar {
-  display: none;
-}
-</style>
