@@ -187,8 +187,15 @@ function clonePiece(piece: Piece): Piece {
   return piece.eagleMode ? { ...piece, eagleMode: piece.eagleMode } : { ...piece }
 }
 
-function cloneBoard(board: (Piece | null)[][]): (Piece | null)[][] {
-  return board.map((row) => row.map((piece) => (piece ? clonePiece(piece) : null)))
+/** Đồng bộ `board` với `mailbox` — cùng reference từng ô (lật đại bàng chỉ sửa object trong mailbox). */
+function boardFromMailbox(mailbox: (Piece | null)[]): (Piece | null)[][] {
+  const board = EMPTY_BOARD()
+  for (let row = 0; row < BOARD_ROWS; row++) {
+    for (let col = 0; col < BOARD_COLS; col++) {
+      board[row]![col] = mailbox[rcToSqInternal(row, col)] ?? null
+    }
+  }
+  return board
 }
 
 function clonePosition(position: Position): Position {
@@ -256,7 +263,7 @@ export function createStateFromBoard(
   }
   const state: VChessState = {
     mailbox,
-    board: cloneBoard(board),
+    board: boardFromMailbox(mailbox),
     turn,
     kingTwoStepAvailable: { red: kingTwoStepAvailable.red, black: kingTwoStepAvailable.black },
     history: history.map((record) => ({
@@ -337,7 +344,7 @@ export function cloneState(state: VChessState): VChessState {
   const mailbox = state.mailbox.map((p) => (p ? clonePiece(p) : null))
   const next: VChessState = {
     mailbox,
-    board: cloneBoard(state.board),
+    board: boardFromMailbox(mailbox),
     turn: state.turn,
     kingTwoStepAvailable: {
       red: state.kingTwoStepAvailable.red,

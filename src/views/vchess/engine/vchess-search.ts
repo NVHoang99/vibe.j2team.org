@@ -13,7 +13,7 @@ import {
   type VChessState,
 } from './vchess-engine'
 import { positionalDifferenceRedMinusBlack } from './vchess-pst'
-import { zobristSideToMove } from './vchess-zobrist'
+// import { zobristSideToMove } from './vchess-zobrist' // (cũ) chỉ dùng cho null-move — đã tắt
 
 /** Theo `rules.md` — tốt = 100; vua không tính vật chất. */
 export function getMaterialValue(piece: Piece): number {
@@ -59,7 +59,7 @@ function evaluateForSideToMove(state: VChessState): number {
 const MATE_SCORE = 50_000
 const MATE_BOUND = 49_000
 
-export const AI_MAX_PLY = 8
+export const AI_MAX_PLY = 12
 
 export const AI_SEARCH_MS_MIN = 8_000
 export const AI_MAX_SEARCH_MS = 15_000
@@ -84,32 +84,37 @@ function isOutOfTime(ctx: SearchContext): boolean {
   return Date.now() >= ctx.deadline
 }
 
-/** --- Repetition table --- */
-const REP_TABLE_SIZE = 1024
-const repTable = new BigUint64Array(REP_TABLE_SIZE)
-let repCount = 0
-
-function repClear(): void {
-  repCount = 0
-}
-
-function repPush(hash: bigint): void {
-  if (repCount < REP_TABLE_SIZE) {
-    repTable[repCount] = hash
-  }
-  repCount++
-}
-
-function repPop(): void {
-  if (repCount > 0) repCount--
-}
-
-function isRepetition(hash: bigint): boolean {
-  for (let i = 0; i < repCount && i < REP_TABLE_SIZE; i++) {
-    if (repTable[i] === hash) return true
-  }
-  return false
-}
+/*
+ * --- Repetition table (đã tắt) ---
+ * Trước đây: nếu hash Zobrist lặp lại trên nhánh search → coi là hòa (0).
+ * Dễ chấm sai với biến thể / đường chiến thuật hợp lệ → bỏ chạy, giữ code tham khảo.
+ *
+ * const REP_TABLE_SIZE = 1024
+ * const repTable = new BigUint64Array(REP_TABLE_SIZE)
+ * let repCount = 0
+ *
+ * function repClear(): void {
+ *   repCount = 0
+ * }
+ *
+ * function repPush(hash: bigint): void {
+ *   if (repCount < REP_TABLE_SIZE) {
+ *     repTable[repCount] = hash
+ *   }
+ *   repCount++
+ * }
+ *
+ * function repPop(): void {
+ *   if (repCount > 0) repCount--
+ * }
+ *
+ * function isRepetition(hash: bigint): boolean {
+ *   for (let i = 0; i < repCount && i < REP_TABLE_SIZE; i++) {
+ *     if (repTable[i] === hash) return true
+ *   }
+ *   return false
+ * }
+ */
 
 /** --- Transposition table --- */
 const TT_SIZE = 1 << 17
@@ -277,19 +282,33 @@ function sortMoves(
   )
 }
 
-const NULL_MIN_DEPTH = 3
-const NULL_R = 2
+/*
+ * --- Null-move pruning (đã tắt) ---
+ * const NULL_MIN_DEPTH = 3
+ * const NULL_R = 2
+ *
+ * function pushNullMove(state: VChessState): void {
+ *   state.turn = state.turn === 'red' ? 'black' : 'red'
+ *   state.hash ^= zobristSideToMove
+ * }
+ *
+ * function popNullMove(state: VChessState): void {
+ *   state.turn = state.turn === 'red' ? 'black' : 'red'
+ *   state.hash ^= zobristSideToMove
+ * }
+ *
+ * Trong negamax, sau khi tính eDepth và trước getAllLegalMoves:
+ * if (allowNull && !inCheck && depth >= NULL_MIN_DEPTH && eDepth > NULL_R + 1) {
+ *   pushNullMove(state)
+ *   const nullChild = negamax(state, eDepth - 1 - NULL_R, -beta, -beta + 1, ply + 1, ctx, false)
+ *   popNullMove(state)
+ *   if (nullChild === null) return null
+ *   if (-nullChild >= beta) return beta
+ * }
+ * (khi bật lại: thêm tham số allowNull vào negamax + `true` ở các lời gọi đệ quy.)
+ */
+
 const MAX_Q_PLY = 12
-
-function pushNullMove(state: VChessState): void {
-  state.turn = state.turn === 'red' ? 'black' : 'red'
-  state.hash ^= zobristSideToMove
-}
-
-function popNullMove(state: VChessState): void {
-  state.turn = state.turn === 'red' ? 'black' : 'red'
-  state.hash ^= zobristSideToMove
-}
 
 function quiescence(
   state: VChessState,
@@ -318,9 +337,7 @@ function quiescence(
 
   for (const move of ordered) {
     if (!searchPushMove(state, move)) continue
-    repPush(state.hash)
     const child = quiescence(state, -beta, -alpha, ply + 1, ctx)
-    repPop()
     popMove(state)
     if (child === null) return null
     const score = -child
@@ -337,13 +354,12 @@ function negamax(
   beta: number,
   ply: number,
   ctx: SearchContext,
-  allowNull: boolean,
 ): number | null {
   if (isOutOfTime(ctx)) return null
 
   const hash = state.hash
 
-  if (ply > 0 && isRepetition(hash)) return 0
+  // if (ply > 0 && isRepetition(hash)) return 0
 
   const ttHit = ttProbe(hash, depth, alpha, beta, ply)
   if (ttHit && ply > 0) {
@@ -360,13 +376,7 @@ function negamax(
     return quiescence(state, alpha, beta, ply, ctx)
   }
 
-  if (allowNull && !inCheck && depth >= NULL_MIN_DEPTH && eDepth > NULL_R + 1) {
-    pushNullMove(state)
-    const nullChild = negamax(state, eDepth - 1 - NULL_R, -beta, -beta + 1, ply + 1, ctx, false)
-    popNullMove(state)
-    if (nullChild === null) return null
-    if (-nullChild >= beta) return beta
-  }
+  // Xem block comment "Null-move pruning (đã tắt)" phía trên để bật lại.
 
   const moves = getAllLegalMoves(state)
   if (moves.length === 0) {
@@ -383,7 +393,7 @@ function negamax(
     const move = ordered[i]!
     if (!searchPushMove(state, move)) continue
 
-    repPush(state.hash)
+    // repPush(state.hash)
     const oppInCheck = isInCheck(state, state.turn)
     let reduction = 0
     if (i > 3 && eDepth > 2 && move.type !== 'capture' && !inCheck && !oppInCheck) {
@@ -392,18 +402,18 @@ function negamax(
 
     let childScore: number | null
     if (i === 0) {
-      childScore = negamax(state, eDepth - 1 - reduction, -beta, -alpha, ply + 1, ctx, true)
+      childScore = negamax(state, eDepth - 1 - reduction, -beta, -alpha, ply + 1, ctx)
     } else {
-      childScore = negamax(state, eDepth - 1 - reduction, -alpha - 1, -alpha, ply + 1, ctx, true)
+      childScore = negamax(state, eDepth - 1 - reduction, -alpha - 1, -alpha, ply + 1, ctx)
       if (childScore !== null) {
         const sc = -childScore
         if (sc > alpha && sc < beta) {
-          childScore = negamax(state, eDepth - 1, -beta, -alpha, ply + 1, ctx, true)
+          childScore = negamax(state, eDepth - 1, -beta, -alpha, ply + 1, ctx)
         }
       }
     }
 
-    repPop()
+    // repPop()
     popMove(state)
     if (childScore === null) return null
 
@@ -452,7 +462,6 @@ export function findBestMoveSync(state: VChessState, budgetMs: number): SearchRe
 
   ttClear()
   clearKillersAndHistory()
-  repClear()
 
   for (let depth = 1; depth <= AI_MAX_PLY; depth++) {
     if (Date.now() >= deadline) break
@@ -473,9 +482,9 @@ export function findBestMoveSync(state: VChessState, budgetMs: number): SearchRe
       }
 
       if (!searchPushMove(root, move)) continue
-      repPush(root.hash)
-      const child = negamax(root, depth - 1, -beta, -alpha, 1, ctx, true)
-      repPop()
+      // repPush(root.hash)
+      const child = negamax(root, depth - 1, -beta, -alpha, 1, ctx)
+      // repPop()
       popMove(root)
       if (child === null) {
         bestMove = null

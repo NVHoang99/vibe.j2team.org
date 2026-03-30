@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { Icon } from '@iconify/vue'
-import { useClipboard, useEventListener, useLocalStorage } from '@vueuse/core'
+import {
+  useClipboard,
+  useElementSize,
+  useEventListener,
+  useLocalStorage,
+  useMediaQuery,
+} from '@vueuse/core'
 import { computed, ref, shallowRef, watch } from 'vue'
 import { useVchessAiWorker } from './composables/use-vchess-ai-worker'
 import { useVchessClock } from './composables/use-vchess-clock'
@@ -14,6 +20,7 @@ import {
   getGameStatus,
   getLegalMovesForSquare,
   isInCheck,
+  isInsideBoard,
   makeMove,
   positionToCoordinate,
   undoLastMove,
@@ -24,8 +31,12 @@ import {
 } from './engine/vchess-engine'
 import { AI_MAX_PLY, AI_MAX_SEARCH_MS, AI_SEARCH_MS_MIN } from './engine/vchess-search'
 import { getPieceImageSrc } from './piece-images'
-import { buildPgnDocument, importGameFromPgnText } from './utils/vchess-pgn'
-import { defaultStartFen, parseVchessFen, serializeVchessFen } from './utils/vchess-fen'
+import {
+  buildPgnDocument,
+  formatHistoryAsPgnMoveText,
+  importGameFromPgnText,
+} from './utils/vchess-pgn'
+import { parseVchessFen, serializeVchessFen } from './utils/vchess-fen'
 import RulesContent from './components/RulesContent.vue'
 
 type Screen = 'menu' | 'ai-setup' | 'rules' | 'game'
@@ -84,6 +95,8 @@ const { copy: copyToClipboard } = useClipboard()
 const pgnFeedback = ref('')
 const pgnPasteText = ref('')
 
+const pgnMovesLine = computed(() => formatHistoryAsPgnMoveText(gameState.value.history))
+
 function clearPgnFeedbackSoon() {
   window.setTimeout(() => {
     pgnFeedback.value = ''
@@ -129,16 +142,6 @@ function applyPgnImport(text: string) {
   }
   pgnFeedback.value = 'Đã nhập ván.'
   clearPgnFeedbackSoon()
-}
-
-async function importPgnFromClipboard() {
-  try {
-    const text = await navigator.clipboard.readText()
-    applyPgnImport(text)
-  } catch {
-    pgnFeedback.value = 'Không đọc được clipboard — dán ván vào ô bên dưới.'
-    clearPgnFeedbackSoon()
-  }
 }
 
 function applyPgnFromTextarea() {
@@ -191,10 +194,6 @@ async function copyFenToClipboard() {
     fenFeedback.value = 'Không sao chép được — chép thủ công từ ô.'
     clearFenFeedbackSoon()
   }
-}
-
-function loadDefaultFenIntoTextarea() {
-  fenPasteText.value = defaultStartFen()
 }
 
 const status = computed(() => getGameStatus(gameState.value))
@@ -269,6 +268,30 @@ const fileLabels = Array.from({ length: BOARD_COLS }, (_, index) => `${index + 1
 const rankLabels = Array.from({ length: BOARD_ROWS }, (_, index) => String.fromCharCode(97 + index))
 const displayRows = Array.from({ length: BOARD_ROWS }, (_, index) => BOARD_ROWS - 1 - index)
 
+/** Khung full-width quanh bàn — đo để tính kích thước ô, tránh scroll ngang trên mobile. */
+const boardFitEl = ref<HTMLDivElement | null>(null)
+const { width: boardFitWidth } = useElementSize(boardFitEl)
+
+/** Trục số/chữ (1–9, a–k) chỉ từ sm — mobile ẩn để ô cờ rộng tối đa. */
+const vchessBoardShowAxes = useMediaQuery('(min-width: 640px)')
+
+/**
+ * Phần cố định ngang ngoài 9 ô: từ sm có viền gỗ + p-3 + khung ô + trục; mobile tối giản (full width) chỉ chừa vài px subpixel.
+ */
+const boardCellGutterPx = computed(() => (vchessBoardShowAxes.value ? 132 : 2))
+
+const boardCellPx = computed(() => {
+  const w = boardFitWidth.value
+  if (!w || w < 80) return 58
+  const raw = Math.floor((w - boardCellGutterPx.value) / 9)
+  if (raw < 1) return 12
+  return Math.min(58, raw)
+})
+
+const boardRootStyle = computed(() => ({
+  '--vchess-cell': `${boardCellPx.value}px`,
+}))
+
 const legalMovesFromSelected = computed(() => {
   if (!selectedSquare.value) return []
   return getLegalMovesForSquare(gameState.value, selectedSquare.value)
@@ -310,7 +333,7 @@ const isAiThinking = computed(
     gameState.value.turn === 'black',
 )
 
-/** Lật đại bàng (mặt đất → bay): chỉ khi đã chọn đúng quân và đến lượt — dùng cho nút / phím L, không gắn vào ô cờ. */
+/** Lật đại bàng (mặt đất → bay): chỉ khi đã chọn đúng quân và đến lượt — icon / phím L (cạnh bàn: nhấp ô quân khi không có ô phía trước trong bàn). */
 const canFlipSelectedEagle = computed(() => {
   if (status.value !== 'playing' || timeoutLoser.value) return false
   if (gameMode.value === 'vs-ai' && aiGamePaused.value) return false
@@ -321,6 +344,32 @@ const canFlipSelectedEagle = computed(() => {
   if (!p || p.kind !== 'eagle' || p.eagleMode !== 'ground') return false
   if (p.side !== gameState.value.turn) return false
   return legalMovesFromSelected.value.some((m) => m.type === 'flip')
+})
+
+/** Vị trí UI lật đại bàng: nút căn giữa ô quân; không dùng nhấp ô trống phía trước (giữa hai chéo) để lật. */
+type EagleFlipUiPlacement =
+  | { kind: 'forwardCell'; renderRow: number; renderCol: number }
+  | { kind: 'eagleEdge'; row: number; col: number }
+
+const eagleFlipUiPlacement = computed((): EagleFlipUiPlacement | null => {
+  if (!canFlipSelectedEagle.value || !selectedSquare.value) return null
+  const sel = selectedSquare.value
+  const p = gameState.value.board[sel.row]?.[sel.col]
+  if (!p || p.kind !== 'eagle') return null
+  const dir = p.side === 'red' ? 1 : -1
+  const mid = { row: sel.row + dir, col: sel.col }
+  if (isInsideBoard(mid)) {
+    return {
+      kind: 'forwardCell',
+      renderRow: sel.row,
+      renderCol: sel.col,
+    }
+  }
+  return {
+    kind: 'eagleEdge',
+    row: sel.row,
+    col: sel.col,
+  }
 })
 
 function isTypingTarget(el: EventTarget | null): boolean {
@@ -519,6 +568,12 @@ function handleSquareClick(row: number, col: number) {
   if (gameMode.value === 'vs-ai' && aiGamePaused.value) return
   if (isAiThinking.value) return
 
+  const flipUi = eagleFlipUiPlacement.value
+  if (flipUi?.kind === 'eagleEdge' && flipUi.row === row && flipUi.col === col) {
+    maybeFlipSelected()
+    return
+  }
+
   const clickedPiece = pieceAt(row, col)
   if (
     selectedSquare.value &&
@@ -643,7 +698,10 @@ function winnerDescription(winner: Side): string {
 </script>
 
 <template>
-  <div class="min-h-screen bg-bg-deep px-3 py-6 text-text-primary sm:px-4 sm:py-8">
+  <div
+    class="min-h-screen bg-bg-deep py-6 text-text-primary sm:py-8"
+    :class="screen === 'game' ? 'overflow-x-hidden px-0 sm:px-4' : 'px-3 sm:px-4'"
+  >
     <!-- Menu chính -->
     <div
       v-if="screen === 'menu'"
@@ -863,7 +921,7 @@ function winnerDescription(winner: Side): string {
     >
       <!-- Cột trái: điều hướng, PGN, FEN -->
       <aside
-        class="animate-fade-up order-2 flex w-full shrink-0 flex-col gap-4 border border-border-default bg-bg-surface p-4 lg:order-none lg:sticky lg:top-6 lg:w-56 xl:w-60"
+        class="animate-fade-up order-3 flex w-full shrink-0 flex-col gap-4 border border-border-default bg-bg-surface p-4 lg:order-none lg:sticky lg:top-6 lg:w-56 xl:w-60"
         aria-label="PGN, FEN và mô tả chế độ"
       >
         <div>
@@ -873,12 +931,12 @@ function winnerDescription(winner: Side): string {
           </h1>
           <p class="mt-2 text-xs text-text-secondary">
             {{ modeLabel }}. Nhấp quân để xem nước hợp lệ. Đại bàng mặt đất: lật sang mặt bay bằng
-            nút <strong class="text-text-primary">Lật đại bàng</strong> (cột phải) hoặc phím
+            icon trên <strong class="text-text-primary">ô quân đại bàng</strong> hoặc phím
             <kbd
               class="rounded border border-border-default bg-bg-deep px-1 font-mono text-[10px] text-text-secondary"
               >L</kbd
             >
-            — không dùng nhấp lại ô cờ.
+            — không dùng nhấp lại ô quân đại bàng.
           </p>
         </div>
         <div class="border border-border-default bg-bg-deep/40 p-3 text-xs">
@@ -895,6 +953,21 @@ function winnerDescription(winner: Side): string {
             <code class="text-text-secondary">+</code>, chiếu hết
             <code class="text-text-secondary">#</code> (tuỳ chọn).
           </p>
+          <div class="mt-3">
+            <span class="mb-1 block text-[10px] uppercase tracking-wider text-text-dim">
+              Nước đã đi
+            </span>
+            <div
+              class="max-h-32 overflow-y-auto border border-border-default/70 bg-bg-deep px-2 py-1.5 font-mono text-[11px] leading-relaxed text-text-primary"
+              role="region"
+              aria-label="Các nước đi theo ký hiệu PGN vChess"
+            >
+              <span v-if="gameState.history.length === 0" class="text-text-dim">
+                Chưa có nước.
+              </span>
+              <span v-else class="whitespace-pre-wrap break-words">{{ pgnMovesLine }}</span>
+            </div>
+          </div>
           <div class="mt-3 flex flex-wrap gap-2">
             <button
               type="button"
@@ -904,18 +977,11 @@ function winnerDescription(winner: Side): string {
               <Icon icon="lucide:copy" class="size-4 shrink-0" aria-hidden="true" />
               Sao chép ván
             </button>
-            <button
-              type="button"
-              class="inline-flex items-center gap-1.5 border border-border-default bg-bg-elevated px-3 py-1.5 text-text-secondary transition hover:border-accent-sky hover:text-text-primary"
-              @click="importPgnFromClipboard"
-            >
-              <Icon icon="lucide:clipboard-paste" class="size-4 shrink-0" aria-hidden="true" />
-              Dán từ clipboard
-            </button>
           </div>
-          <label class="mt-3 block">
-            <span class="mb-1 block text-[10px] uppercase tracking-wider text-text-dim">
-              Hoặc dán PGN vào đây
+          <label class="mt-6 block">
+            <span class="mb-1 block text-[10px] leading-relaxed text-text-dim">
+              Dán hoặc gõ toàn bộ PGN ván cờ vào ô dưới, rồi bấm «Áp dụng ván đã dán» để nhập ván —
+              sẽ thay thế ván đang chơi.
             </span>
             <textarea
               v-model="pgnPasteText"
@@ -964,16 +1030,8 @@ function winnerDescription(winner: Side): string {
               <Icon icon="lucide:braces" class="size-4 shrink-0" aria-hidden="true" />
               Sao chép FEN hiện tại
             </button>
-            <button
-              type="button"
-              class="inline-flex items-center gap-1.5 border border-border-default bg-bg-elevated px-3 py-1.5 text-text-secondary transition hover:border-accent-amber hover:text-text-primary"
-              @click="loadDefaultFenIntoTextarea"
-            >
-              <Icon icon="lucide:layout-template" class="size-4 shrink-0" aria-hidden="true" />
-              Điền FEN khai cuộc
-            </button>
           </div>
-          <label class="mt-3 block">
+          <label class="mt-6 block">
             <span class="mb-1 block text-[10px] uppercase tracking-wider text-text-dim"
               >Đặt / dán FEN</span
             >
@@ -1002,14 +1060,14 @@ function winnerDescription(winner: Side): string {
         </div>
       </aside>
 
-      <!-- Giữa: avatar + bàn cờ -->
+      <!-- Giữa: avatar + bàn cờ — mobile: bàn full-bleed, không padding/viền khối; từ sm giữ layout cũ. -->
       <section
-        class="animate-fade-up animate-delay-2 order-1 min-w-0 flex-1 border border-border-default bg-bg-surface p-4 sm:p-5 lg:order-none"
+        class="animate-fade-up animate-delay-2 order-1 min-w-0 flex-1 border-0 bg-bg-surface p-0 sm:border sm:border-border-default sm:p-5 lg:order-none"
         aria-label="Bàn cờ và người chơi"
       >
-        <div class="flex flex-col items-center gap-3">
+        <div class="flex w-full flex-col items-stretch gap-3 sm:items-center">
           <div
-            class="flex w-full max-w-[min(100%,42rem)] items-center gap-3 border border-border-default bg-bg-deep/40 px-3 py-2 transition"
+            class="relative mx-3 flex w-[calc(100%-1.5rem)] max-w-[min(100%,42rem)] items-center gap-3 border border-border-default bg-bg-deep/40 px-3 py-2 transition sm:mx-auto sm:w-full"
             :class="
               highlightBoardTopAvatar
                 ? 'ring-1 ring-accent-amber/50 ring-offset-2 ring-offset-bg-surface'
@@ -1017,7 +1075,7 @@ function winnerDescription(winner: Side): string {
             "
           >
             <div
-              class="flex size-12 shrink-0 items-center justify-center rounded-full border border-border-default bg-bg-elevated text-accent-amber"
+              class="relative z-[1] flex size-12 shrink-0 items-center justify-center rounded-full border border-border-default bg-bg-elevated text-accent-amber"
               aria-hidden="true"
             >
               <Icon
@@ -1025,7 +1083,37 @@ function winnerDescription(winner: Side): string {
                 class="size-7"
               />
             </div>
-            <div class="min-w-0 flex-1 text-left">
+            <div
+              v-if="gameMode === 'vs-ai' && matchClockSettings"
+              class="pointer-events-none absolute inset-0 flex items-center justify-center px-14"
+            >
+              <span
+                role="timer"
+                aria-live="polite"
+                :aria-label="`Đồng hồ Đen: ${formatClock(blackMs)}`"
+                class="inline-flex min-w-[5.5rem] items-center justify-center rounded-sm border px-2 py-0.5 font-mono text-base font-semibold tabular-nums"
+                :class="
+                  status === 'playing' &&
+                  !timeoutLoser &&
+                  !aiGamePaused &&
+                  gameState.turn === 'black'
+                    ? 'border-accent-amber/50 bg-bg-elevated text-text-primary ring-1 ring-accent-amber/40'
+                    : 'border-border-default bg-bg-elevated/90 text-text-secondary'
+                "
+              >
+                {{ formatClock(blackMs) }}
+              </span>
+            </div>
+            <div
+              v-if="gameMode === 'vs-ai' && matchClockSettings"
+              class="relative z-[1] ml-auto min-w-0 text-right"
+            >
+              <p class="font-display text-sm font-semibold text-text-primary">Đen</p>
+              <p class="text-xs text-text-dim">
+                {{ gameMode === 'vs-ai' ? 'Máy' : 'Hai người — cầm quân phía trên bàn' }}
+              </p>
+            </div>
+            <div v-else class="min-w-0 flex-1 text-left">
               <p class="font-display text-sm font-semibold text-text-primary">Đen</p>
               <p class="text-xs text-text-dim">
                 {{ gameMode === 'vs-ai' ? 'Máy' : 'Hai người — cầm quân phía trên bàn' }}
@@ -1033,45 +1121,55 @@ function winnerDescription(winner: Side): string {
             </div>
           </div>
 
-          <div class="w-full overflow-x-auto">
-            <div class="mx-auto w-fit">
-              <div
-                class="border-4 border-[#3d2e22] bg-[#a08060] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]"
-              >
-                <div class="mb-1 flex items-center gap-2">
-                  <div class="inline-flex w-8 shrink-0" aria-hidden="true" />
-                  <div class="flex">
-                    <span
-                      v-for="file in fileLabels"
-                      :key="`file-${file}`"
-                      class="inline-flex min-h-4 min-w-[58px] items-center justify-center text-xs font-display leading-none text-[#3d3428]"
-                    >
-                      {{ file }}
-                    </span>
-                  </div>
-                  <div class="inline-flex w-8 shrink-0" aria-hidden="true" />
+          <div
+            ref="boardFitEl"
+            class="w-full min-w-0 max-w-full overflow-x-hidden overflow-y-visible"
+          >
+            <div
+              class="vchess-board-root w-full max-w-full overflow-visible border-0 bg-transparent p-0 shadow-none sm:mx-auto sm:w-fit sm:border-4 sm:border-[#3d2e22] sm:bg-[#a08060] sm:p-3 sm:shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]"
+              :style="boardRootStyle"
+            >
+              <div class="mb-1 hidden items-center gap-2 sm:flex">
+                <div class="inline-flex w-8 shrink-0" aria-hidden="true" />
+                <div class="flex">
+                  <span
+                    v-for="file in fileLabels"
+                    :key="`file-${file}`"
+                    class="vchess-board-file inline-flex min-h-4 items-center justify-center text-xs font-display leading-none text-[#3d3428]"
+                  >
+                    {{ file }}
+                  </span>
+                </div>
+                <div class="inline-flex w-8 shrink-0" aria-hidden="true" />
+              </div>
+
+              <div class="flex min-w-0 items-start gap-2">
+                <div class="hidden shrink-0 flex-col sm:flex">
+                  <span
+                    v-for="displayRow in displayRows"
+                    :key="`rank-l-${displayRow}`"
+                    class="vchess-board-rank inline-flex w-8 items-center justify-center text-xs font-display text-[#3d3428]"
+                  >
+                    {{ rankLabels[displayRow] }}
+                  </span>
                 </div>
 
-                <div class="flex items-start gap-2">
-                  <div class="flex shrink-0 flex-col">
-                    <span
-                      v-for="displayRow in displayRows"
-                      :key="`rank-l-${displayRow}`"
-                      class="inline-flex min-h-[58px] w-8 items-center justify-center text-xs font-display text-[#3d3428]"
-                    >
-                      {{ rankLabels[displayRow] }}
-                    </span>
-                  </div>
-
+                <div
+                  class="flex min-w-0 flex-1 flex-col items-center overflow-visible border-0 p-0 shadow-none sm:flex-none sm:items-stretch sm:border-2 sm:border-[#e8dcc8] sm:p-1 sm:shadow-[inset_0_0_0_1px_rgba(255,250,240,0.35)]"
+                >
                   <div
-                    class="border-2 border-[#e8dcc8] p-1 shadow-[inset_0_0_0_1px_rgba(255,250,240,0.35)]"
+                    v-for="displayRow in displayRows"
+                    :key="`row-${displayRow}`"
+                    class="flex overflow-visible max-sm:justify-center sm:justify-start"
                   >
-                    <div v-for="displayRow in displayRows" :key="`row-${displayRow}`" class="flex">
+                    <div
+                      v-for="col in BOARD_COLS"
+                      :key="`cell-wrap-${displayRow}-${col - 1}`"
+                      class="relative inline-flex shrink-0"
+                    >
                       <button
-                        v-for="col in BOARD_COLS"
-                        :key="`cell-${displayRow}-${col - 1}`"
                         type="button"
-                        class="relative inline-flex min-h-[58px] min-w-[58px] shrink-0 items-center justify-center text-sm font-display transition duration-150"
+                        class="vchess-board-cell relative inline-flex shrink-0 items-center justify-center text-sm font-display transition duration-150"
                         :class="[
                           'border-r border-b border-[#c9a882] bg-[#f5e8d8]',
                           displayRow === BOARD_ROWS - 1 ? 'border-t border-[#c9a882]' : '',
@@ -1129,7 +1227,7 @@ function winnerDescription(winner: Side): string {
                         />
                         <template v-if="pieceAt(displayRow, col - 1)">
                           <span
-                            class="relative z-[2] flex size-[48px] items-center justify-center rounded-[10px] border-[3px] bg-gradient-to-b from-white to-[#f5f1ea] p-1.5 transition duration-200 ease-out will-change-transform"
+                            class="vchess-board-piece relative z-[2] flex items-center justify-center rounded-[10px] border-[3px] bg-gradient-to-b from-white to-[#f5f1ea] p-1 transition duration-200 ease-out will-change-transform sm:p-1.5"
                             :class="[
                               isSquareSelected(displayRow, col - 1)
                                 ? isRedTurn
@@ -1152,25 +1250,59 @@ function winnerDescription(winner: Side): string {
                           </span>
                         </template>
                       </button>
+                      <button
+                        v-if="
+                          eagleFlipUiPlacement?.kind === 'forwardCell' &&
+                          eagleFlipUiPlacement.renderRow === displayRow &&
+                          eagleFlipUiPlacement.renderCol === col - 1
+                        "
+                        type="button"
+                        class="vchess-eagle-flip-btn absolute top-1/2 left-0 right-0 z-[50] mx-auto flex shrink-0 -translate-y-1/2 items-center justify-center rounded-full border border-accent-amber/85 bg-bg-elevated/95 text-accent-amber shadow-[0_2px_8px_rgba(61,46,34,0.2)] ring-2 ring-accent-amber/35"
+                        aria-label="Lật đại bàng sang mặt bay (mặt đất → bay)"
+                        @click.stop="maybeFlipSelected"
+                      >
+                        <Icon
+                          icon="lucide:flip-horizontal-2"
+                          class="size-[min(1rem,calc(var(--vchess-cell)*0.35))] shrink-0"
+                          aria-hidden="true"
+                        />
+                      </button>
+                      <button
+                        v-if="
+                          eagleFlipUiPlacement?.kind === 'eagleEdge' &&
+                          eagleFlipUiPlacement.row === displayRow &&
+                          eagleFlipUiPlacement.col === col - 1
+                        "
+                        type="button"
+                        class="vchess-eagle-flip-btn absolute top-1/2 left-0 right-0 z-[50] mx-auto flex shrink-0 -translate-y-1/2 items-center justify-center rounded-full border border-accent-amber/85 bg-bg-elevated/95 text-accent-amber shadow-[0_2px_8px_rgba(61,46,34,0.2)] ring-2 ring-accent-amber/35"
+                        aria-label="Lật đại bàng sang mặt bay (mặt đất → bay)"
+                        @click.stop="maybeFlipSelected"
+                      >
+                        <Icon
+                          icon="lucide:flip-horizontal-2"
+                          class="size-[min(1rem,calc(var(--vchess-cell)*0.35))] shrink-0"
+                          aria-hidden="true"
+                        />
+                      </button>
                     </div>
                   </div>
+                </div>
 
-                  <div class="flex shrink-0 flex-col" aria-hidden="true">
-                    <span
-                      v-for="displayRow in displayRows"
-                      :key="`rank-r-${displayRow}`"
-                      class="inline-flex min-h-[58px] w-8 items-center justify-center text-xs font-display text-[#3d3428]"
-                    >
-                      {{ rankLabels[displayRow] }}
-                    </span>
-                  </div>
+                <div class="hidden shrink-0 flex-col sm:flex" aria-hidden="true">
+                  <span
+                    v-for="displayRow in displayRows"
+                    :key="`rank-r-${displayRow}`"
+                    class="vchess-board-rank inline-flex w-8 items-center justify-center text-xs font-display text-[#3d3428]"
+                  >
+                    {{ rankLabels[displayRow] }}
+                  </span>
                 </div>
               </div>
             </div>
           </div>
 
           <div
-            class="flex w-full max-w-[min(100%,42rem)] items-center gap-3 border border-border-default bg-bg-deep/40 px-3 py-2 transition"
+            class="relative mx-3 flex w-[calc(100%-1.5rem)] max-w-[min(100%,42rem)] items-center gap-3 border border-border-default bg-bg-deep/40 px-3 py-2 transition sm:mx-auto sm:w-full"
             :class="
               highlightBoardBottomAvatar
                 ? 'ring-1 ring-accent-coral/45 ring-offset-2 ring-offset-bg-surface'
@@ -1178,12 +1310,39 @@ function winnerDescription(winner: Side): string {
             "
           >
             <div
-              class="flex size-12 shrink-0 items-center justify-center rounded-full border border-border-default bg-bg-elevated text-accent-coral"
+              class="relative z-[1] flex size-12 shrink-0 items-center justify-center rounded-full border border-border-default bg-bg-elevated text-accent-coral"
               aria-hidden="true"
             >
               <Icon icon="lucide:user-round" class="size-7" />
             </div>
-            <div class="min-w-0 flex-1 text-left">
+            <div
+              v-if="gameMode === 'vs-ai' && matchClockSettings"
+              class="pointer-events-none absolute inset-0 flex items-center justify-center px-14"
+            >
+              <span
+                role="timer"
+                aria-live="polite"
+                :aria-label="`Đồng hồ Đỏ: ${formatClock(redMs)}`"
+                class="inline-flex min-w-[5.5rem] items-center justify-center rounded-sm border px-2 py-0.5 font-mono text-base font-semibold tabular-nums"
+                :class="
+                  status === 'playing' && !timeoutLoser && !aiGamePaused && gameState.turn === 'red'
+                    ? 'border-accent-coral/50 bg-bg-elevated text-text-primary ring-1 ring-accent-coral/40'
+                    : 'border-border-default bg-bg-elevated/90 text-text-secondary'
+                "
+              >
+                {{ formatClock(redMs) }}
+              </span>
+            </div>
+            <div
+              v-if="gameMode === 'vs-ai' && matchClockSettings"
+              class="relative z-[1] ml-auto min-w-0 text-right"
+            >
+              <p class="font-display text-sm font-semibold text-text-primary">Đỏ</p>
+              <p class="text-xs text-text-dim">
+                {{ gameMode === 'vs-ai' ? 'Bạn' : 'Hai người — cầm quân phía dưới bàn' }}
+              </p>
+            </div>
+            <div v-else class="min-w-0 flex-1 text-left">
               <p class="font-display text-sm font-semibold text-text-primary">Đỏ</p>
               <p class="text-xs text-text-dim">
                 {{ gameMode === 'vs-ai' ? 'Bạn' : 'Hai người — cầm quân phía dưới bàn' }}
@@ -1195,7 +1354,7 @@ function winnerDescription(winner: Side): string {
 
       <!-- Cột phải: thao tác + lượt + đồng hồ + luật -->
       <aside
-        class="animate-fade-up animate-delay-3 order-3 flex w-full shrink-0 flex-col gap-4 border border-border-default bg-bg-surface p-4 lg:order-none lg:sticky lg:top-6 lg:w-72 xl:w-80"
+        class="animate-fade-up animate-delay-2 order-2 flex w-full shrink-0 flex-col gap-4 border border-border-default bg-bg-surface p-4 lg:order-none lg:sticky lg:top-6 lg:animate-delay-3 lg:w-72 xl:w-80"
         aria-label="Thao tác, lượt đi, đồng hồ và luật"
       >
         <div class="border border-border-default bg-bg-elevated p-3">
@@ -1209,16 +1368,18 @@ function winnerDescription(winner: Side): string {
             </RouterLink>
             <button
               type="button"
-              class="border border-border-default bg-bg-deep px-3 py-1.5 text-text-secondary transition hover:border-accent-amber hover:text-text-primary"
+              class="inline-flex items-center gap-1.5 border border-border-default bg-bg-deep px-3 py-1.5 text-text-secondary transition hover:border-accent-amber hover:text-text-primary"
               @click="goMenu"
             >
+              <Icon icon="lucide:menu" class="size-4 shrink-0" aria-hidden="true" />
               Menu
             </button>
             <button
               type="button"
-              class="border border-border-default bg-bg-deep px-3 py-1.5 text-text-secondary transition hover:border-accent-amber hover:text-text-primary"
+              class="inline-flex items-center gap-1.5 border border-border-default bg-bg-deep px-3 py-1.5 text-text-secondary transition hover:border-accent-amber hover:text-text-primary"
               @click="resetGame"
             >
+              <Icon icon="lucide:rotate-ccw" class="size-4 shrink-0" aria-hidden="true" />
               Chơi lại
             </button>
             <button
@@ -1244,15 +1405,6 @@ function winnerDescription(winner: Side): string {
               />
               {{ aiGamePaused ? 'Tiếp tục' : 'Tạm dừng' }}
             </button>
-            <button
-              type="button"
-              class="inline-flex w-full items-center justify-center gap-2 border border-accent-amber/70 bg-accent-amber/10 px-3 py-2 text-sm font-medium text-accent-amber transition hover:border-accent-amber hover:bg-accent-amber/15 sm:w-auto disabled:cursor-not-allowed disabled:border-border-default disabled:bg-bg-deep disabled:text-text-dim disabled:opacity-50 disabled:hover:border-border-default disabled:hover:bg-bg-deep"
-              :disabled="!canFlipSelectedEagle"
-              @click="maybeFlipSelected"
-            >
-              <Icon icon="lucide:plane-takeoff" class="size-4 shrink-0" aria-hidden="true" />
-              Lật đại bàng (mặt bay)
-            </button>
           </div>
         </div>
 
@@ -1267,35 +1419,12 @@ function winnerDescription(winner: Side): string {
         >
           <p class="font-display tracking-wide text-accent-sky">// Đồng hồ (Fischer)</p>
           <p class="mt-2 text-text-dim">
+            Thời gian hiển thị giữa thanh bàn cờ: Đen (trên, máy), Đỏ (dưới, bạn).
+          </p>
+          <p class="mt-2 text-text-dim">
             Mỗi bên: {{ initialMinutesForClock }} phút ban đầu, +{{ incrementSecondsForClock }}s mỗi
             nước.
           </p>
-          <div class="mt-3 grid grid-cols-2 gap-2 font-mono text-sm">
-            <div
-              class="border border-border-default px-2 py-2 text-center"
-              :class="
-                status === 'playing' && !timeoutLoser && !aiGamePaused && gameState.turn === 'red'
-                  ? 'bg-accent-coral/15 text-text-primary ring-1 ring-accent-coral/40'
-                  : 'bg-bg-elevated text-text-secondary'
-              "
-            >
-              <span class="block text-[10px] uppercase tracking-wider text-text-dim">Đỏ (bạn)</span>
-              <span class="text-base font-semibold tabular-nums">{{ formatClock(redMs) }}</span>
-            </div>
-            <div
-              class="border border-border-default px-2 py-2 text-center"
-              :class="
-                status === 'playing' && !timeoutLoser && !aiGamePaused && gameState.turn === 'black'
-                  ? 'bg-bg-elevated text-text-primary ring-1 ring-accent-amber/50'
-                  : 'bg-bg-elevated text-text-secondary'
-              "
-            >
-              <span class="block text-[10px] uppercase tracking-wider text-text-dim"
-                >Đen (máy)</span
-              >
-              <span class="text-base font-semibold tabular-nums">{{ formatClock(blackMs) }}</span>
-            </div>
-          </div>
           <p class="mt-3 text-text-dim">
             Muốn đổi: Menu → Chơi với máy để tạo ván mới với thời gian khác.
           </p>
@@ -1312,8 +1441,8 @@ function winnerDescription(winner: Side): string {
           <p class="font-display text-xs tracking-widest text-accent-amber">// Luật nhanh</p>
           <p class="mt-2 text-xs leading-relaxed text-text-secondary">
             Lưới 9×11; <strong class="text-text-primary">Đỏ</strong> đi trước. Không để vua bị
-            chiếu; chiếu hết / stalemate như cờ vua. Đại bàng mặt đất: nút
-            <strong class="text-text-primary">Lật đại bàng</strong> hoặc phím
+            chiếu; chiếu hết / stalemate như cờ vua. Đại bàng mặt đất: nhấp icon trên
+            <strong class="text-text-primary">ô quân đại bàng</strong> hoặc phím
             <kbd class="rounded border border-border-default bg-bg-deep px-1 font-mono text-[10px]"
               >L</kbd
             >
@@ -1392,9 +1521,10 @@ function winnerDescription(winner: Side): string {
           <div class="mt-6 flex flex-wrap gap-2">
             <button
               type="button"
-              class="border border-accent-coral bg-accent-coral/10 px-4 py-2.5 text-sm font-medium text-accent-coral transition hover:bg-accent-coral/20"
+              class="inline-flex items-center gap-2 border border-accent-coral bg-accent-coral/10 px-4 py-2.5 text-sm font-medium text-accent-coral transition hover:bg-accent-coral/20"
               @click="resetGame"
             >
+              <Icon icon="lucide:rotate-ccw" class="size-4 shrink-0" aria-hidden="true" />
               Chơi lại
             </button>
             <button
@@ -1412,6 +1542,40 @@ function winnerDescription(winner: Side): string {
 </template>
 
 <style scoped>
+/* Ô cờ co theo --vchess-cell (set từ script theo khung boardFitEl). */
+.vchess-board-root {
+  --vchess-cell: 58px;
+}
+
+.vchess-board-file {
+  min-width: var(--vchess-cell);
+}
+
+.vchess-board-rank {
+  min-height: var(--vchess-cell);
+  box-sizing: border-box;
+}
+
+.vchess-board-cell {
+  box-sizing: border-box;
+  width: var(--vchess-cell);
+  min-width: var(--vchess-cell);
+  min-height: var(--vchess-cell);
+  height: var(--vchess-cell);
+}
+
+.vchess-board-piece {
+  width: min(3rem, calc(var(--vchess-cell) * 0.82));
+  height: min(3rem, calc(var(--vchess-cell) * 0.82));
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.vchess-eagle-flip-btn {
+  width: min(2.25rem, calc(var(--vchess-cell) * 0.58));
+  height: min(2.25rem, calc(var(--vchess-cell) * 0.58));
+}
+
 /* Nước đi cuối: ô đi (amber) / ô đến (sky) — tách biệt màu với ô chiếu (coral). */
 .vchess-last-move-from {
   background: linear-gradient(135deg, rgba(255, 184, 48, 0.38) 0%, rgba(255, 184, 48, 0.14) 100%);

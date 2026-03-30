@@ -202,6 +202,11 @@ function buildPgnBodyWithCheckSuffix(history: MoveRecord[]): string {
   return chunks.join(' ')
 }
 
+/** Chuỗi nước giống thân PGN khi xuất (LAN + `+` / `#`) — dùng hiển thị danh sách nước. */
+export function formatHistoryAsPgnMoveText(history: MoveRecord[]): string {
+  return buildPgnBodyWithCheckSuffix(history)
+}
+
 function matchLegalMove(state: VChessState, partial: Move): Move | null {
   const candidates = getLegalMovesForSquare(state, partial.from)
   return (

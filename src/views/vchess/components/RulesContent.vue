@@ -47,11 +47,12 @@
           <strong class="text-text-primary">Đại bàng</strong> — hai mặt: <em>đất</em> (hai chéo phía
           trước, không lùi về phía phe mình); <em>bay</em> (tới ô trống bất kỳ, không ăn; hạ cánh
           thì lật quân). Lật tại chỗ hết lượt, lượt sau mới bay được nếu đang mặt bay. Trên app:
-          chọn quân rồi dùng nút <strong class="text-text-primary">Lật đại bàng</strong> hoặc phím
+          chọn quân rồi nhấp icon trên <strong class="text-text-primary">ô quân đại bàng</strong>
+          hoặc phím
           <kbd class="rounded border border-border-default bg-bg-deep px-1 font-mono text-[10px]"
             >L</kbd
           >
-          — không lật bằng nhấp lại ô cờ.
+          — không lật bằng nhấp lại ô quân đại bàng.
         </li>
         <li>
           <strong class="text-text-primary">Sát thủ</strong> — đi không ăn: nhảy ô trống

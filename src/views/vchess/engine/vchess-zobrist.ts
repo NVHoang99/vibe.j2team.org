@@ -3,7 +3,10 @@
  * Export đủ internals để engine dùng incremental hashing.
  */
 
-import { BOARD_COLS, BOARD_ROWS, type Piece, type VChessState } from './vchess-engine'
+import type { Piece, VChessState } from './vchess-engine'
+
+const BOARD_ROWS = 11
+const BOARD_COLS = 9
 
 const SQ = BOARD_ROWS * BOARD_COLS
 
