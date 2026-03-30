@@ -2,6 +2,7 @@ import {
   BOARD_COLS,
   BOARD_ROWS,
   createInitialState,
+  createStateFromBoard,
   type Piece,
   type Side,
   type VChessState,
@@ -210,10 +211,5 @@ export function parseVchessFen(input: string): VChessState | { error: string } {
     }
   }
 
-  return {
-    board,
-    turn,
-    kingTwoStepAvailable: { red: k2r, black: k2b },
-    history: [],
-  }
+  return createStateFromBoard(board, turn, { red: k2r, black: k2b }, [])
 }

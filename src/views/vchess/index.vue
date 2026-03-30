@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Icon } from '@iconify/vue'
 import { useClipboard, useEventListener, useLocalStorage } from '@vueuse/core'
-import { computed, ref, watch } from 'vue'
+import { computed, ref, shallowRef, watch } from 'vue'
 import { useVchessAiWorker } from './composables/use-vchess-ai-worker'
 import { useVchessClock } from './composables/use-vchess-clock'
 import { useVchessSounds } from './composables/use-vchess-sounds'
@@ -34,7 +34,8 @@ type GameMode = 'solo' | 'vs-ai'
 const screen = ref<Screen>('menu')
 const gameMode = ref<GameMode>('solo')
 
-const gameState = ref(createInitialState())
+/** shallowRef: engine gọi apply/unapply tạm trên state — deep reactive sẽ kích hoạt lại computed giữa chừng và có thể lặp vô hạn. */
+const gameState = shallowRef(createInitialState())
 const selectedSquare = ref<Position | null>(null)
 
 /** Đồng hồ ván vs máy — chỉ gán khi bấm «Bắt đầu» ở màn chuẩn bị. */
@@ -202,7 +203,7 @@ const status = computed(() => getGameStatus(gameState.value))
 const kingInCheckSquare = computed((): Position | null => {
   if (status.value !== 'playing' && status.value !== 'checkmate') return null
   if (!isInCheck(gameState.value, gameState.value.turn)) return null
-  return findKing(gameState.value.board, gameState.value.turn)
+  return findKing(gameState.value, gameState.value.turn)
 })
 
 const {

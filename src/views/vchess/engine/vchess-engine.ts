@@ -1,6 +1,14 @@
 export const BOARD_ROWS = 11
 export const BOARD_COLS = 9
 
+/** Mailbox 11×15: 2 hàng `x` trên + 11 hàng chơi + 2 dưới; mỗi hàng `x` + 9 ô + `x`. */
+export const MAILBOX_WIDTH = 11
+export const MAILBOX_HEIGHT = 15
+export const MAIL_SIZE = MAILBOX_WIDTH * MAILBOX_HEIGHT
+
+const RANK_PAD = 2
+const FILE_PAD = 1
+
 export type Side = 'red' | 'black'
 export type PieceKind =
   | 'rook'
@@ -35,26 +43,41 @@ export interface MoveRecord {
   move: Move
   movedPiece: Piece
   capturedPiece: Piece | null
-  /** Snapshot trước khi đi nước — cần để `popMove` khôi phục chính xác (vua hai ô). */
   kingTwoStepAvailableBefore: Record<Side, boolean>
 }
 
 export interface VChessState {
+  /** Mảng một chiều 165 ô; chỉ các ô chơi được gán quân (off-board bỏ qua). */
+  mailbox: (Piece | null)[]
+  /** Bản 2D đồng bộ với `mailbox` — dùng UI / FEN. */
   board: (Piece | null)[][]
   turn: Side
   kingTwoStepAvailable: Record<Side, boolean>
   history: MoveRecord[]
+  /** Chỉ số mailbox của vua; `-1` nếu không có. */
+  kingSq: Record<Side, number>
 }
 
 const FILES = ['1', '2', '3', '4', '5', '6', '7', '8', '9'] as const
 const RANKS = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k'] as const
 
-const ORTHOGONAL_DIRECTIONS: Position[] = [
-  { row: 1, col: 0 },
-  { row: -1, col: 0 },
-  { row: 0, col: 1 },
-  { row: 0, col: -1 },
-]
+/** Bước dọc tia trên mailbox (hàng engine tăng = chỉ số tăng 11). */
+const M_NORTH = -MAILBOX_WIDTH
+const M_SOUTH = MAILBOX_WIDTH
+const M_WEST = -1
+const M_EAST = 1
+const MAIL_ROOK_DIRS = [M_NORTH, M_SOUTH, M_WEST, M_EAST] as const
+
+function rcToSqInternal(row: number, col: number): number {
+  return (row + RANK_PAD) * MAILBOX_WIDTH + (col + FILE_PAD)
+}
+
+const KNIGHT_MAIL = [
+  { leg: M_SOUTH, targets: [M_SOUTH + M_SOUTH + M_EAST, M_SOUTH + M_SOUTH + M_WEST] as const },
+  { leg: M_NORTH, targets: [M_NORTH + M_NORTH + M_EAST, M_NORTH + M_NORTH + M_WEST] as const },
+  { leg: M_EAST, targets: [M_SOUTH + M_EAST + M_EAST, M_NORTH + M_EAST + M_EAST] as const },
+  { leg: M_WEST, targets: [M_SOUTH + M_WEST + M_WEST, M_NORTH + M_WEST + M_WEST] as const },
+] as const
 
 const KING_DIRECTIONS: Position[] = [
   { row: 1, col: 0 },
@@ -67,36 +90,33 @@ const KING_DIRECTIONS: Position[] = [
   { row: -1, col: -1 },
 ]
 
-const KNIGHT_RULES = [
-  {
-    leg: { row: 1, col: 0 },
-    targets: [
-      { row: 2, col: 1 },
-      { row: 2, col: -1 },
-    ],
-  },
-  {
-    leg: { row: -1, col: 0 },
-    targets: [
-      { row: -2, col: 1 },
-      { row: -2, col: -1 },
-    ],
-  },
-  {
-    leg: { row: 0, col: 1 },
-    targets: [
-      { row: 1, col: 2 },
-      { row: -1, col: 2 },
-    ],
-  },
-  {
-    leg: { row: 0, col: -1 },
-    targets: [
-      { row: 1, col: -2 },
-      { row: -1, col: -2 },
-    ],
-  },
-]
+/** Các ô chơi theo chỉ số mailbox (99 phần tử). */
+const PLAYABLE_SQ: readonly number[] = (() => {
+  const list: number[] = []
+  for (let row = 0; row < BOARD_ROWS; row++) {
+    for (let col = 0; col < BOARD_COLS; col++) {
+      list.push(rcToSqInternal(row, col))
+    }
+  }
+  return list
+})()
+
+export function rcToMailboxSq(row: number, col: number): number {
+  return rcToSqInternal(row, col)
+}
+
+export function mailboxSqToRc(sq: number): Position {
+  return {
+    row: Math.floor(sq / MAILBOX_WIDTH) - RANK_PAD,
+    col: (sq % MAILBOX_WIDTH) - FILE_PAD,
+  }
+}
+
+export function isPlayableMailboxSq(sq: number): boolean {
+  const r = (sq / MAILBOX_WIDTH) | 0
+  const c = sq % MAILBOX_WIDTH
+  return r >= RANK_PAD && r < RANK_PAD + BOARD_ROWS && c >= FILE_PAD && c < FILE_PAD + BOARD_COLS
+}
 
 const EMPTY_BOARD = () =>
   Array.from({ length: BOARD_ROWS }, () =>
@@ -129,53 +149,130 @@ function createMajorRow(side: Side): Piece[] {
   ]
 }
 
+function emptyMailbox(): (Piece | null)[] {
+  return Array.from({ length: MAIL_SIZE }, (): Piece | null => null)
+}
+
+function pieceAt(state: VChessState, pos: Position): Piece | null {
+  if (!isInsideBoard(pos)) return null
+  return state.mailbox[rcToSqInternal(pos.row, pos.col)] ?? null
+}
+
+function setPieceState(state: VChessState, pos: Position, piece: Piece | null): void {
+  if (!isInsideBoard(pos)) return
+  const sq = rcToSqInternal(pos.row, pos.col)
+  state.mailbox[sq] = piece
+  const row = state.board[pos.row]
+  if (row) row[pos.col] = piece
+}
+
+function recomputeKingSq(state: VChessState): void {
+  let red = -1
+  let black = -1
+  for (const sq of PLAYABLE_SQ) {
+    const p = state.mailbox[sq]
+    if (p?.kind === 'king') {
+      if (p.side === 'red') red = sq
+      else black = sq
+    }
+  }
+  state.kingSq.red = red
+  state.kingSq.black = black
+}
+
+/** Tạo state đầy đủ từ bàn 2D (FEN / nhập liệu). */
+export function createStateFromBoard(
+  board: (Piece | null)[][],
+  turn: Side,
+  kingTwoStepAvailable: Record<Side, boolean>,
+  history: MoveRecord[] = [],
+): VChessState {
+  const mailbox = emptyMailbox()
+  for (let r = 0; r < BOARD_ROWS; r++) {
+    for (let c = 0; c < BOARD_COLS; c++) {
+      const p = board[r]?.[c] ?? null
+      mailbox[rcToSqInternal(r, c)] = p ? clonePiece(p) : null
+    }
+  }
+  const state: VChessState = {
+    mailbox,
+    board: cloneBoard(board),
+    turn,
+    kingTwoStepAvailable: { red: kingTwoStepAvailable.red, black: kingTwoStepAvailable.black },
+    history: history.map((record) => ({
+      move: {
+        from: clonePosition(record.move.from),
+        to: clonePosition(record.move.to),
+        type: record.move.type,
+        captureSquare: record.move.captureSquare
+          ? clonePosition(record.move.captureSquare)
+          : undefined,
+      },
+      movedPiece: clonePiece(record.movedPiece),
+      capturedPiece: record.capturedPiece ? clonePiece(record.capturedPiece) : null,
+      kingTwoStepAvailableBefore: {
+        red: record.kingTwoStepAvailableBefore.red,
+        black: record.kingTwoStepAvailableBefore.black,
+      },
+    })),
+    kingSq: { red: -1, black: -1 },
+  }
+  recomputeKingSq(state)
+  return state
+}
+
 export function createInitialState(): VChessState {
   const board = EMPTY_BOARD()
+  const mailbox = emptyMailbox()
+  const state: VChessState = {
+    mailbox,
+    board,
+    turn: 'red',
+    kingTwoStepAvailable: { red: true, black: true },
+    history: [],
+    kingSq: { red: -1, black: -1 },
+  }
+
   const redMajor = createMajorRow('red')
   for (let col = 0; col < BOARD_COLS; col++) {
     const piece = redMajor[col]
-    if (piece) setPiece(board, { row: 0, col }, piece)
+    if (piece) setPieceState(state, { row: 0, col }, piece)
   }
 
-  setPiece(board, { row: 1, col: 2 }, { side: 'red', kind: 'assassin' })
-  setPiece(board, { row: 1, col: 6 }, { side: 'red', kind: 'assassin' })
-  setPiece(board, { row: 2, col: 1 }, { side: 'red', kind: 'gunner' })
-  setPiece(board, { row: 2, col: 7 }, { side: 'red', kind: 'gunner' })
-  setPiece(board, { row: 3, col: 0 }, { side: 'red', kind: 'pawn' })
-  setPiece(board, { row: 3, col: 2 }, { side: 'red', kind: 'pawn' })
-  setPiece(board, { row: 3, col: 4 }, { side: 'red', kind: 'pawn' })
-  setPiece(board, { row: 3, col: 6 }, { side: 'red', kind: 'pawn' })
-  setPiece(board, { row: 3, col: 8 }, { side: 'red', kind: 'pawn' })
+  setPieceState(state, { row: 1, col: 2 }, { side: 'red', kind: 'assassin' })
+  setPieceState(state, { row: 1, col: 6 }, { side: 'red', kind: 'assassin' })
+  setPieceState(state, { row: 2, col: 1 }, { side: 'red', kind: 'gunner' })
+  setPieceState(state, { row: 2, col: 7 }, { side: 'red', kind: 'gunner' })
+  setPieceState(state, { row: 3, col: 0 }, { side: 'red', kind: 'pawn' })
+  setPieceState(state, { row: 3, col: 2 }, { side: 'red', kind: 'pawn' })
+  setPieceState(state, { row: 3, col: 4 }, { side: 'red', kind: 'pawn' })
+  setPieceState(state, { row: 3, col: 6 }, { side: 'red', kind: 'pawn' })
+  setPieceState(state, { row: 3, col: 8 }, { side: 'red', kind: 'pawn' })
 
   const blackMajor = createMajorRow('black')
   for (let col = 0; col < BOARD_COLS; col++) {
     const piece = blackMajor[col]
-    if (piece) setPiece(board, { row: 10, col }, piece)
+    if (piece) setPieceState(state, { row: 10, col }, piece)
   }
 
-  setPiece(board, { row: 9, col: 2 }, { side: 'black', kind: 'assassin' })
-  setPiece(board, { row: 9, col: 6 }, { side: 'black', kind: 'assassin' })
-  setPiece(board, { row: 8, col: 1 }, { side: 'black', kind: 'gunner' })
-  setPiece(board, { row: 8, col: 7 }, { side: 'black', kind: 'gunner' })
-  setPiece(board, { row: 7, col: 0 }, { side: 'black', kind: 'pawn' })
-  setPiece(board, { row: 7, col: 2 }, { side: 'black', kind: 'pawn' })
-  setPiece(board, { row: 7, col: 4 }, { side: 'black', kind: 'pawn' })
-  setPiece(board, { row: 7, col: 6 }, { side: 'black', kind: 'pawn' })
-  setPiece(board, { row: 7, col: 8 }, { side: 'black', kind: 'pawn' })
+  setPieceState(state, { row: 9, col: 2 }, { side: 'black', kind: 'assassin' })
+  setPieceState(state, { row: 9, col: 6 }, { side: 'black', kind: 'assassin' })
+  setPieceState(state, { row: 8, col: 1 }, { side: 'black', kind: 'gunner' })
+  setPieceState(state, { row: 8, col: 7 }, { side: 'black', kind: 'gunner' })
+  setPieceState(state, { row: 7, col: 0 }, { side: 'black', kind: 'pawn' })
+  setPieceState(state, { row: 7, col: 2 }, { side: 'black', kind: 'pawn' })
+  setPieceState(state, { row: 7, col: 4 }, { side: 'black', kind: 'pawn' })
+  setPieceState(state, { row: 7, col: 6 }, { side: 'black', kind: 'pawn' })
+  setPieceState(state, { row: 7, col: 8 }, { side: 'black', kind: 'pawn' })
 
-  return {
-    board,
-    turn: 'red',
-    kingTwoStepAvailable: {
-      red: true,
-      black: true,
-    },
-    history: [],
-  }
+  recomputeKingSq(state)
+  return state
 }
 
 export function cloneState(state: VChessState): VChessState {
-  return {
+  const mailbox = state.mailbox.map((p) => (p ? clonePiece(p) : null))
+  const next: VChessState = {
+    mailbox,
     board: cloneBoard(state.board),
     turn: state.turn,
     kingTwoStepAvailable: {
@@ -198,7 +295,9 @@ export function cloneState(state: VChessState): VChessState {
         black: record.kingTwoStepAvailableBefore.black,
       },
     })),
+    kingSq: { red: state.kingSq.red, black: state.kingSq.black },
   }
+  return next
 }
 
 export function positionToCoordinate(position: Position): string {
@@ -207,7 +306,6 @@ export function positionToCoordinate(position: Position): string {
   return `${rank}${file}`
 }
 
-/** Ngược `positionToCoordinate` — `a1` … `k9`; không hợp lệ trả `null`. */
 export function coordinateToPosition(coord: string): Position | null {
   const c = coord.trim().toLowerCase()
   if (c.length < 2) return null
@@ -225,19 +323,6 @@ export function isInsideBoard(position: Position): boolean {
   )
 }
 
-function getPiece(board: (Piece | null)[][], position: Position): Piece | null {
-  if (!isInsideBoard(position)) return null
-  const row = board[position.row]
-  if (!row) return null
-  return row[position.col] ?? null
-}
-
-function setPiece(board: (Piece | null)[][], position: Position, piece: Piece | null): void {
-  const row = board[position.row]
-  if (!row) return
-  row[position.col] = piece
-}
-
 function forwardDelta(side: Side): number {
   return side === 'red' ? 1 : -1
 }
@@ -247,14 +332,14 @@ function isAlly(piece: Piece | null, side: Side): boolean {
 }
 
 function pushMoveIfValid(
-  board: (Piece | null)[][],
+  state: VChessState,
   side: Side,
   from: Position,
   to: Position,
   moves: Move[],
 ): void {
   if (!isInsideBoard(to)) return
-  const target = getPiece(board, to)
+  const target = pieceAt(state, to)
   if (target === null) {
     moves.push({ from, to, type: 'move' })
     return
@@ -264,17 +349,18 @@ function pushMoveIfValid(
   }
 }
 
-function generateRookMoves(board: (Piece | null)[][], piece: Piece, from: Position): Move[] {
+function generateRookMoves(state: VChessState, piece: Piece, from: Position): Move[] {
   const moves: Move[] = []
-  for (const direction of ORTHOGONAL_DIRECTIONS) {
-    let step = 1
+  const fromSq = rcToSqInternal(from.row, from.col)
+  for (const dir of MAIL_ROOK_DIRS) {
+    let sq = fromSq
     while (true) {
-      const to = { row: from.row + direction.row * step, col: from.col + direction.col * step }
-      if (!isInsideBoard(to)) break
-      const target = getPiece(board, to)
+      sq += dir
+      if (!isPlayableMailboxSq(sq)) break
+      const target = state.mailbox[sq]
+      const to = mailboxSqToRc(sq)
       if (target === null) {
         moves.push({ from, to, type: 'move' })
-        step++
         continue
       }
       if (target.side !== piece.side) {
@@ -286,19 +372,16 @@ function generateRookMoves(board: (Piece | null)[][], piece: Piece, from: Positi
   return moves
 }
 
-function generateKnightMoves(board: (Piece | null)[][], piece: Piece, from: Position): Move[] {
+function generateKnightMoves(state: VChessState, piece: Piece, from: Position): Move[] {
   const moves: Move[] = []
-  for (const rule of KNIGHT_RULES) {
-    const legSquare = { row: from.row + rule.leg.row, col: from.col + rule.leg.col }
-    if (!isInsideBoard(legSquare) || getPiece(board, legSquare) !== null) continue
-    for (const offset of rule.targets) {
-      pushMoveIfValid(
-        board,
-        piece.side,
-        from,
-        { row: from.row + offset.row, col: from.col + offset.col },
-        moves,
-      )
+  const fromSq = rcToSqInternal(from.row, from.col)
+  for (const rule of KNIGHT_MAIL) {
+    const legSq = fromSq + rule.leg
+    if (!isPlayableMailboxSq(legSq) || state.mailbox[legSq] !== null) continue
+    for (const tOff of rule.targets) {
+      const tsq = fromSq + tOff
+      if (!isPlayableMailboxSq(tsq)) continue
+      pushMoveIfValid(state, piece.side, from, mailboxSqToRc(tsq), moves)
     }
   }
   return moves
@@ -322,43 +405,43 @@ function getGunnerTargets(piece: Piece, from: Position): Position[] {
   ]
 }
 
-function generatePawnMoves(board: (Piece | null)[][], piece: Piece, from: Position): Move[] {
+function generatePawnMoves(state: VChessState, piece: Piece, from: Position): Move[] {
   const moves: Move[] = []
   for (const target of getPawnTargets(piece, from)) {
-    pushMoveIfValid(board, piece.side, from, target, moves)
+    pushMoveIfValid(state, piece.side, from, target, moves)
   }
   return moves
 }
 
-function generateGunnerMoves(board: (Piece | null)[][], piece: Piece, from: Position): Move[] {
+function generateGunnerMoves(state: VChessState, piece: Piece, from: Position): Move[] {
   const front = { row: from.row + forwardDelta(piece.side), col: from.col }
-  if (!isInsideBoard(front) || getPiece(board, front) !== null) return []
+  if (!isInsideBoard(front) || pieceAt(state, front) !== null) return []
   const moves: Move[] = []
   for (const target of getGunnerTargets(piece, from)) {
-    pushMoveIfValid(board, piece.side, from, target, moves)
+    pushMoveIfValid(state, piece.side, from, target, moves)
   }
   return moves
 }
 
-function generateElephantMoves(board: (Piece | null)[][], piece: Piece, from: Position): Move[] {
+function generateElephantMoves(state: VChessState, piece: Piece, from: Position): Move[] {
   const dir = forwardDelta(piece.side)
   const front = { row: from.row + dir, col: from.col }
-  const frontPiece = getPiece(board, front)
+  const frontPiece = pieceAt(state, front)
   const moves: Move[] = []
 
   if (isAlly(frontPiece, piece.side)) {
-    pushMoveIfValid(board, piece.side, from, { row: from.row + dir, col: from.col - 1 }, moves)
-    pushMoveIfValid(board, piece.side, from, { row: from.row + dir, col: from.col + 1 }, moves)
+    pushMoveIfValid(state, piece.side, from, { row: from.row + dir, col: from.col - 1 }, moves)
+    pushMoveIfValid(state, piece.side, from, { row: from.row + dir, col: from.col + 1 }, moves)
     return moves
   }
 
   for (const target of getPawnTargets(piece, from)) {
-    pushMoveIfValid(board, piece.side, from, target, moves)
+    pushMoveIfValid(state, piece.side, from, target, moves)
   }
 
   if (frontPiece === null) {
     for (const target of getGunnerTargets(piece, from)) {
-      pushMoveIfValid(board, piece.side, from, target, moves)
+      pushMoveIfValid(state, piece.side, from, target, moves)
     }
   }
 
@@ -369,7 +452,7 @@ function generateKingMoves(state: VChessState, piece: Piece, from: Position): Mo
   const moves: Move[] = []
   for (const direction of KING_DIRECTIONS) {
     pushMoveIfValid(
-      state.board,
+      state,
       piece.side,
       from,
       { row: from.row + direction.row, col: from.col + direction.col },
@@ -382,27 +465,22 @@ function generateKingMoves(state: VChessState, piece: Piece, from: Position): Mo
       const middle = { row: from.row + direction.row, col: from.col + direction.col }
       const destination = { row: from.row + direction.row * 2, col: from.col + direction.col * 2 }
       if (!isInsideBoard(middle) || !isInsideBoard(destination)) continue
-      if (getPiece(state.board, middle) !== null) continue
-      pushMoveIfValid(state.board, piece.side, from, destination, moves)
+      if (pieceAt(state, middle) !== null) continue
+      pushMoveIfValid(state, piece.side, from, destination, moves)
     }
   }
 
   return moves
 }
 
-function generateEagleMoves(board: (Piece | null)[][], piece: Piece, from: Position): Move[] {
+function generateEagleMoves(state: VChessState, piece: Piece, from: Position): Move[] {
   if (piece.eagleMode === 'flying') {
     const moves: Move[] = []
-    for (let row = 0; row < BOARD_ROWS; row++) {
-      for (let col = 0; col < BOARD_COLS; col++) {
-        if (row === from.row && col === from.col) continue
-        if (getPiece(board, { row, col }) === null) {
-          moves.push({
-            from,
-            to: { row, col },
-            type: 'move',
-          })
-        }
+    for (const sq of PLAYABLE_SQ) {
+      const to = mailboxSqToRc(sq)
+      if (to.row === from.row && to.col === from.col) continue
+      if (state.mailbox[sq] === null) {
+        moves.push({ from, to, type: 'move' })
       }
     }
     return moves
@@ -410,8 +488,8 @@ function generateEagleMoves(board: (Piece | null)[][], piece: Piece, from: Posit
 
   const dir = forwardDelta(piece.side)
   const moves: Move[] = []
-  pushMoveIfValid(board, piece.side, from, { row: from.row + dir, col: from.col - 1 }, moves)
-  pushMoveIfValid(board, piece.side, from, { row: from.row + dir, col: from.col + 1 }, moves)
+  pushMoveIfValid(state, piece.side, from, { row: from.row + dir, col: from.col - 1 }, moves)
+  pushMoveIfValid(state, piece.side, from, { row: from.row + dir, col: from.col + 1 }, moves)
   moves.push({
     from,
     to: clonePosition(from),
@@ -420,36 +498,35 @@ function generateEagleMoves(board: (Piece | null)[][], piece: Piece, from: Posit
   return moves
 }
 
-function generateAssassinMoves(board: (Piece | null)[][], piece: Piece, from: Position): Move[] {
+function generateAssassinMoves(state: VChessState, piece: Piece, from: Position): Move[] {
   const moves: Move[] = []
-  for (const direction of ORTHOGONAL_DIRECTIONS) {
+  const fromSq = rcToSqInternal(from.row, from.col)
+  for (const dir of MAIL_ROOK_DIRS) {
     let step = 1
-    let firstOccupied: Position | null = null
+    let firstSq: number | null = null
 
     while (true) {
-      const current = { row: from.row + direction.row * step, col: from.col + direction.col * step }
-      if (!isInsideBoard(current)) break
-      if (getPiece(board, current) !== null) {
-        firstOccupied = current
+      const sq = fromSq + dir * step
+      if (!isPlayableMailboxSq(sq)) break
+      if (state.mailbox[sq] !== null) {
+        firstSq = sq
         break
       }
       step++
     }
 
-    if (!firstOccupied) continue
+    if (firstSq === null) continue
 
-    const firstPiece = getPiece(board, firstOccupied)
+    const firstPos = mailboxSqToRc(firstSq)
+    const firstPiece = state.mailbox[firstSq]
     if (firstPiece && firstPiece.side === piece.side) {
       let tail = 1
       while (true) {
-        const current = {
-          row: firstOccupied.row + direction.row * tail,
-          col: firstOccupied.col + direction.col * tail,
-        }
-        if (!isInsideBoard(current)) break
-        const target = getPiece(board, current)
+        const sq = firstSq + dir * tail
+        if (!isPlayableMailboxSq(sq)) break
+        const target = state.mailbox[sq]
         if (target === null) {
-          moves.push({ from, to: current, type: 'move' })
+          moves.push({ from, to: mailboxSqToRc(sq), type: 'move' })
           tail++
           continue
         }
@@ -459,30 +536,22 @@ function generateAssassinMoves(board: (Piece | null)[][], piece: Piece, from: Po
     }
 
     if (firstPiece && firstPiece.side !== piece.side) {
-      const captureSquares: Position[] = []
       let tail = 1
       while (true) {
-        const current = {
-          row: firstOccupied.row + direction.row * tail,
-          col: firstOccupied.col + direction.col * tail,
-        }
-        if (!isInsideBoard(current)) break
-        const target = getPiece(board, current)
+        const sq = firstSq + dir * tail
+        if (!isPlayableMailboxSq(sq)) break
+        const target = state.mailbox[sq]
         if (target === null) {
-          captureSquares.push(current)
+          moves.push({
+            from,
+            to: mailboxSqToRc(sq),
+            type: 'capture',
+            captureSquare: clonePosition(firstPos),
+          })
           tail++
           continue
         }
         break
-      }
-
-      for (const landingSquare of captureSquares) {
-        moves.push({
-          from,
-          to: landingSquare,
-          type: 'capture',
-          captureSquare: clonePosition(firstOccupied),
-        })
       }
     }
   }
@@ -490,65 +559,58 @@ function generateAssassinMoves(board: (Piece | null)[][], piece: Piece, from: Po
 }
 
 function piecePseudoMoves(state: VChessState, from: Position): Move[] {
-  const piece = getPiece(state.board, from)
+  const piece = pieceAt(state, from)
   if (!piece) return []
   switch (piece.kind) {
     case 'rook':
-      return generateRookMoves(state.board, piece, from)
+      return generateRookMoves(state, piece, from)
     case 'knight':
-      return generateKnightMoves(state.board, piece, from)
+      return generateKnightMoves(state, piece, from)
     case 'elephant':
-      return generateElephantMoves(state.board, piece, from)
+      return generateElephantMoves(state, piece, from)
     case 'gunner':
-      return generateGunnerMoves(state.board, piece, from)
+      return generateGunnerMoves(state, piece, from)
     case 'king':
       return generateKingMoves(state, piece, from)
     case 'pawn':
-      return generatePawnMoves(state.board, piece, from)
+      return generatePawnMoves(state, piece, from)
     case 'assassin':
-      return generateAssassinMoves(state.board, piece, from)
+      return generateAssassinMoves(state, piece, from)
     case 'eagle':
-      return generateEagleMoves(state.board, piece, from)
+      return generateEagleMoves(state, piece, from)
     default:
       return []
   }
 }
 
-export function findKing(board: (Piece | null)[][], side: Side): Position | null {
-  for (let row = 0; row < BOARD_ROWS; row++) {
-    for (let col = 0; col < BOARD_COLS; col++) {
-      const piece = getPiece(board, { row, col })
-      if (!piece) continue
-      if (piece.kind === 'king' && piece.side === side) {
-        return { row, col }
-      }
-    }
-  }
-  return null
+export function findKing(state: VChessState, side: Side): Position | null {
+  const sq = state.kingSq[side]
+  if (sq < 0) return null
+  return mailboxSqToRc(sq)
 }
 
-function isRookAttacking(board: (Piece | null)[][], from: Position, to: Position): boolean {
+function isRookAttackingMailbox(state: VChessState, fromSq: number, toSq: number): boolean {
+  const from = mailboxSqToRc(fromSq)
+  const to = mailboxSqToRc(toSq)
   if (from.row !== to.row && from.col !== to.col) return false
   const rowStep = from.row === to.row ? 0 : from.row < to.row ? 1 : -1
   const colStep = from.col === to.col ? 0 : from.col < to.col ? 1 : -1
-  let row = from.row + rowStep
-  let col = from.col + colStep
-  while (row !== to.row || col !== to.col) {
-    if (getPiece(board, { row, col }) !== null) return false
-    row += rowStep
-    col += colStep
+  let r = from.row + rowStep
+  let c = from.col + colStep
+  while (r !== to.row || c !== to.col) {
+    if (pieceAt(state, { row: r, col: c }) !== null) return false
+    r += rowStep
+    c += colStep
   }
   return true
 }
 
-function isKnightAttacking(board: (Piece | null)[][], from: Position, to: Position): boolean {
-  for (const rule of KNIGHT_RULES) {
-    const legSquare = { row: from.row + rule.leg.row, col: from.col + rule.leg.col }
-    if (!isInsideBoard(legSquare) || getPiece(board, legSquare) !== null) continue
-    for (const target of rule.targets) {
-      if (from.row + target.row === to.row && from.col + target.col === to.col) {
-        return true
-      }
+function isKnightAttackingMailbox(state: VChessState, fromSq: number, toSq: number): boolean {
+  for (const rule of KNIGHT_MAIL) {
+    const legSq = fromSq + rule.leg
+    if (!isPlayableMailboxSq(legSq) || state.mailbox[legSq] !== null) continue
+    for (const tOff of rule.targets) {
+      if (fromSq + tOff === toSq) return true
     }
   }
   return false
@@ -561,27 +623,27 @@ function isPawnAttacking(piece: Piece, from: Position, to: Position): boolean {
 }
 
 function isGunnerAttacking(
-  board: (Piece | null)[][],
+  state: VChessState,
   piece: Piece,
   from: Position,
   to: Position,
 ): boolean {
   const front = { row: from.row + forwardDelta(piece.side), col: from.col }
-  if (!isInsideBoard(front) || getPiece(board, front) !== null) return false
+  if (!isInsideBoard(front) || pieceAt(state, front) !== null) return false
   return getGunnerTargets(piece, from).some(
     (target) => target.row === to.row && target.col === to.col,
   )
 }
 
 function isElephantAttacking(
-  board: (Piece | null)[][],
+  state: VChessState,
   piece: Piece,
   from: Position,
   to: Position,
 ): boolean {
   const dir = forwardDelta(piece.side)
   const front = { row: from.row + dir, col: from.col }
-  const frontPiece = getPiece(board, front)
+  const frontPiece = pieceAt(state, front)
 
   if (isAlly(frontPiece, piece.side)) {
     return (
@@ -591,7 +653,7 @@ function isElephantAttacking(
   }
 
   if (isPawnAttacking(piece, from, to)) return true
-  if (frontPiece === null && isGunnerAttacking(board, piece, from, to)) return true
+  if (frontPiece === null && isGunnerAttacking(state, piece, from, to)) return true
   return false
 }
 
@@ -608,7 +670,7 @@ function isKingAttacking(state: VChessState, piece: Piece, from: Position, to: P
   const rowStep = to.row > from.row ? 1 : to.row < from.row ? -1 : 0
   const colStep = to.col > from.col ? 1 : to.col < from.col ? -1 : 0
   const middle = { row: from.row + rowStep, col: from.col + colStep }
-  return getPiece(state.board, middle) === null
+  return pieceAt(state, middle) === null
 }
 
 function isEagleAttacking(piece: Piece, from: Position, to: Position): boolean {
@@ -620,63 +682,67 @@ function isEagleAttacking(piece: Piece, from: Position, to: Position): boolean {
   )
 }
 
-function isAssassinAttacking(
-  board: (Piece | null)[][],
+function isAssassinAttackingMailbox(
+  state: VChessState,
   piece: Piece,
-  from: Position,
-  to: Position,
+  fromSq: number,
+  toSq: number,
 ): boolean {
-  for (const direction of ORTHOGONAL_DIRECTIONS) {
+  for (const dir of MAIL_ROOK_DIRS) {
     let step = 1
     while (true) {
-      const current = { row: from.row + direction.row * step, col: from.col + direction.col * step }
-      if (!isInsideBoard(current)) break
-      const blocker = getPiece(board, current)
+      const sq = fromSq + dir * step
+      if (!isPlayableMailboxSq(sq)) break
+      const blocker = state.mailbox[sq]
       if (blocker === null) {
         step++
         continue
       }
 
       if (blocker.side === piece.side) break
-      if (current.row !== to.row || current.col !== to.col) break
+      if (sq !== toSq) break
 
-      const behind = { row: to.row + direction.row, col: to.col + direction.col }
-      return isInsideBoard(behind) && getPiece(board, behind) === null
+      const behind = toSq + dir
+      return isPlayableMailboxSq(behind) && state.mailbox[behind] === null
     }
   }
   return false
 }
 
-function isSquareAttacked(state: VChessState, square: Position, bySide: Side): boolean {
-  for (let row = 0; row < BOARD_ROWS; row++) {
-    for (let col = 0; col < BOARD_COLS; col++) {
-      const piece = getPiece(state.board, { row, col })
-      if (!piece || piece.side !== bySide) continue
-      const from = { row, col }
-      const attacks =
-        piece.kind === 'rook'
-          ? isRookAttacking(state.board, from, square)
-          : piece.kind === 'knight'
-            ? isKnightAttacking(state.board, from, square)
-            : piece.kind === 'elephant'
-              ? isElephantAttacking(state.board, piece, from, square)
-              : piece.kind === 'gunner'
-                ? isGunnerAttacking(state.board, piece, from, square)
-                : piece.kind === 'king'
-                  ? isKingAttacking(state, piece, from, square)
-                  : piece.kind === 'pawn'
-                    ? isPawnAttacking(piece, from, square)
-                    : piece.kind === 'assassin'
-                      ? isAssassinAttacking(state.board, piece, from, square)
-                      : isEagleAttacking(piece, from, square)
-      if (attacks) return true
-    }
+function isSquareAttacked(state: VChessState, targetSq: number, bySide: Side): boolean {
+  for (const sq of PLAYABLE_SQ) {
+    const piece = state.mailbox[sq]
+    if (!piece || piece.side !== bySide) continue
+    const from = mailboxSqToRc(sq)
+    const to = mailboxSqToRc(targetSq)
+    const attacks =
+      piece.kind === 'rook'
+        ? isRookAttackingMailbox(state, sq, targetSq)
+        : piece.kind === 'knight'
+          ? isKnightAttackingMailbox(state, sq, targetSq)
+          : piece.kind === 'elephant'
+            ? isElephantAttacking(state, piece, from, to)
+            : piece.kind === 'gunner'
+              ? isGunnerAttacking(state, piece, from, to)
+              : piece.kind === 'king'
+                ? isKingAttacking(state, piece, from, to)
+                : piece.kind === 'pawn'
+                  ? isPawnAttacking(piece, from, to)
+                  : piece.kind === 'assassin'
+                    ? isAssassinAttackingMailbox(state, piece, sq, targetSq)
+                    : isEagleAttacking(piece, from, to)
+    if (attacks) return true
   }
   return false
+}
+
+function isSquareAttackedAtPosition(state: VChessState, square: Position, bySide: Side): boolean {
+  if (!isInsideBoard(square)) return false
+  return isSquareAttacked(state, rcToSqInternal(square.row, square.col), bySide)
 }
 
 function applyMoveUnsafe(state: VChessState, move: Move): MoveRecord | null {
-  const movingPiece = getPiece(state.board, move.from)
+  const movingPiece = pieceAt(state, move.from)
   if (!movingPiece) return null
   const movedPieceBefore = clonePiece(movingPiece)
   const kingTwoStepAvailableBefore: Record<Side, boolean> = {
@@ -686,24 +752,26 @@ function applyMoveUnsafe(state: VChessState, move: Move): MoveRecord | null {
 
   let capturedPiece: Piece | null = null
   if (move.type === 'capture' && move.captureSquare) {
-    capturedPiece = getPiece(state.board, move.captureSquare)
-    setPiece(state.board, move.captureSquare, null)
+    capturedPiece = pieceAt(state, move.captureSquare)
+    setPieceState(state, move.captureSquare, null)
   }
 
   if (move.type === 'flip') {
     if (movingPiece.kind !== 'eagle' || movingPiece.eagleMode === 'flying') return null
     movingPiece.eagleMode = 'flying'
   } else {
-    setPiece(state.board, move.from, null)
+    setPieceState(state, move.from, null)
     const pieceAfterMove = clonePiece(movingPiece)
     if (pieceAfterMove.kind === 'eagle' && pieceAfterMove.eagleMode === 'flying') {
       pieceAfterMove.eagleMode = 'ground'
     }
-    setPiece(state.board, move.to, pieceAfterMove)
+    setPieceState(state, move.to, pieceAfterMove)
     if (movedPieceBefore.kind === 'king') {
       state.kingTwoStepAvailable[movedPieceBefore.side] = false
     }
   }
+
+  recomputeKingSq(state)
 
   return {
     move: {
@@ -722,54 +790,87 @@ function unapplyMove(state: VChessState, record: MoveRecord): void {
   const { move, movedPiece, capturedPiece, kingTwoStepAvailableBefore } = record
 
   if (move.type === 'flip') {
-    const p = getPiece(state.board, move.from)
+    const p = pieceAt(state, move.from)
     if (p?.kind === 'eagle') p.eagleMode = 'ground'
     state.kingTwoStepAvailable.red = kingTwoStepAvailableBefore.red
     state.kingTwoStepAvailable.black = kingTwoStepAvailableBefore.black
     state.turn = movedPiece.side
+    recomputeKingSq(state)
     return
   }
 
-  setPiece(state.board, move.to, null)
-  setPiece(state.board, move.from, clonePiece(movedPiece))
+  setPieceState(state, move.to, null)
+  setPieceState(state, move.from, clonePiece(movedPiece))
   if (move.type === 'capture' && capturedPiece && move.captureSquare) {
-    setPiece(state.board, move.captureSquare, clonePiece(capturedPiece))
+    setPieceState(state, move.captureSquare, clonePiece(capturedPiece))
   }
   state.kingTwoStepAvailable.red = kingTwoStepAvailableBefore.red
   state.kingTwoStepAvailable.black = kingTwoStepAvailableBefore.black
   state.turn = movedPiece.side
+  recomputeKingSq(state)
+}
+
+function getKingTwoStepMiddle(from: Position, to: Position): Position | null {
+  const rowDiff = Math.abs(from.row - to.row)
+  const colDiff = Math.abs(from.col - to.col)
+  if (rowDiff > 2 || colDiff > 2) return null
+  if (Math.max(rowDiff, colDiff) !== 2) return null
+  if (!(rowDiff === 0 || colDiff === 0 || rowDiff === colDiff)) return null
+  const rowStep = to.row > from.row ? 1 : to.row < from.row ? -1 : 0
+  const colStep = to.col > from.col ? 1 : to.col < from.col ? -1 : 0
+  const middle = { row: from.row + rowStep, col: from.col + colStep }
+  if (!isInsideBoard(middle)) return null
+  return middle
+}
+
+/** Ô trung gian nước vua 2 ô không được đi qua khi đang bị chiếu. */
+function passesKingTwoStepMiddleGuard(state: VChessState, move: Move): boolean {
+  const movingPiece = pieceAt(state, move.from)
+  if (!movingPiece) return false
+  const enemy = state.turn === 'red' ? 'black' : 'red'
+  if (movingPiece.kind === 'king' && state.kingTwoStepAvailable[movingPiece.side]) {
+    const middle = getKingTwoStepMiddle(move.from, move.to)
+    if (middle !== null && pieceAt(state, middle) === null) {
+      if (isSquareAttackedAtPosition(state, middle, enemy)) return false
+    }
+  }
+  return true
+}
+
+/** Sau khi đã `applyMoveUnsafe`, vua của phe `side` (đang đến lượt trước khi flip turn) có an toàn không. */
+function isKingSafeForMover(state: VChessState, mover: Side): boolean {
+  const ks = state.kingSq[mover]
+  if (ks < 0) return false
+  const enemy = mover === 'red' ? 'black' : 'red'
+  return !isSquareAttacked(state, ks, enemy)
 }
 
 function isMoveLegal(state: VChessState, move: Move): boolean {
-  const simulation = cloneState(state)
-  const record = applyMoveUnsafe(simulation, move)
+  if (!passesKingTwoStepMiddleGuard(state, move)) return false
+  const record = applyMoveUnsafe(state, move)
   if (!record) return false
-
-  const ownKing = findKing(simulation.board, state.turn)
-  if (!ownKing) return false
-  const enemy = state.turn === 'red' ? 'black' : 'red'
-  return !isSquareAttacked(simulation, ownKing, enemy)
+  const mover = state.turn
+  const ok = isKingSafeForMover(state, mover)
+  unapplyMove(state, record)
+  return ok
 }
 
 export function getLegalMovesForSquare(state: VChessState, from: Position): Move[] {
-  const piece = getPiece(state.board, from)
+  const piece = pieceAt(state, from)
   if (!piece || piece.side !== state.turn) return []
   return piecePseudoMoves(state, from).filter((move) => isMoveLegal(state, move))
 }
 
 export function getAllLegalMoves(state: VChessState): Move[] {
   const moves: Move[] = []
-  for (let row = 0; row < BOARD_ROWS; row++) {
-    for (let col = 0; col < BOARD_COLS; col++) {
-      const piece = getPiece(state.board, { row, col })
-      if (piece?.side !== state.turn) continue
-      moves.push(...getLegalMovesForSquare(state, { row, col }))
-    }
+  for (const sq of PLAYABLE_SQ) {
+    const piece = state.mailbox[sq]
+    if (piece?.side !== state.turn) continue
+    moves.push(...getLegalMovesForSquare(state, mailboxSqToRc(sq)))
   }
   return moves
 }
 
-/** So sánh nước đi (dùng TT, killer, history). */
 export function movesEqual(a: Move, b: Move): boolean {
   return (
     a.from.row === b.from.row &&
@@ -782,27 +883,28 @@ export function movesEqual(a: Move, b: Move): boolean {
   )
 }
 
-/** Chỉ nước ăn quân — dùng cho quiescence. */
 export function getLegalCaptures(state: VChessState): Move[] {
   return getAllLegalMoves(state).filter((m) => m.type === 'capture')
 }
 
-/**
- * Áp một nước hợp lệ trực tiếp lên `state` (mutate) — dùng cho AI search + `popMove`.
- * Trả `false` nếu nước không hợp lệ.
- */
 export function tryPushMove(state: VChessState, move: Move): boolean {
-  const legalMoves = getLegalMovesForSquare(state, move.from)
-  const candidate = legalMoves.find((legalMove) => movesEqual(legalMove, move))
+  const piece = pieceAt(state, move.from)
+  if (!piece || piece.side !== state.turn) return false
+  const candidate = piecePseudoMoves(state, move.from).find((m) => movesEqual(m, move))
   if (!candidate) return false
+  if (!passesKingTwoStepMiddleGuard(state, candidate)) return false
   const record = applyMoveUnsafe(state, candidate)
   if (!record) return false
+  const mover = state.turn
+  if (!isKingSafeForMover(state, mover)) {
+    unapplyMove(state, record)
+    return false
+  }
   state.history.push(record)
   state.turn = state.turn === 'red' ? 'black' : 'red'
   return true
 }
 
-/** Hoàn tác nước cuối từ `tryPushMove` / search — mutate `state`. */
 export function popMove(state: VChessState): void {
   const record = state.history.pop()
   if (!record) throw new Error('popMove: empty history')
@@ -833,10 +935,6 @@ export function makeMove(state: VChessState, move: Move): VChessState {
   return nextState
 }
 
-/**
- * Bỏ nước cuối — tái tạo bàn bằng cách chơi lại từ đầu (đảm bảo `kingTwoStepAvailable` đúng).
- * Trả `null` nếu không có lịch sử hoặc lịch sử không tái lập được.
- */
 export function undoLastMove(state: VChessState): VChessState | null {
   if (state.history.length === 0) return null
   const trimmed = state.history.slice(0, -1)
@@ -850,10 +948,10 @@ export function undoLastMove(state: VChessState): VChessState | null {
 }
 
 export function isInCheck(state: VChessState, side: Side): boolean {
-  const kingSquare = findKing(state.board, side)
-  if (!kingSquare) return false
+  const ks = state.kingSq[side]
+  if (ks < 0) return false
   const enemy = side === 'red' ? 'black' : 'red'
-  return isSquareAttacked(state, kingSquare, enemy)
+  return isSquareAttacked(state, ks, enemy)
 }
 
 export type GameStatus = 'playing' | 'checkmate' | 'stalemate'
