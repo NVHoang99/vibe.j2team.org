@@ -3,18 +3,17 @@ import {
   BOARD_ROWS,
   cloneState,
   getAllLegalMoves,
-  getGameStatus,
   getLegalCaptures,
   isInCheck,
   movesEqual,
   popMove,
-  tryPushMove,
+  searchPushMove,
   type Move,
   type Piece,
   type VChessState,
 } from './vchess-engine'
 import { positionalDifferenceRedMinusBlack } from './vchess-pst'
-import { computeHash } from './vchess-zobrist'
+import { zobristSideToMove } from './vchess-zobrist'
 
 /** Theo `rules.md` — tốt = 100; vua không tính vật chất. */
 export function getMaterialValue(piece: Piece): number {
@@ -58,6 +57,7 @@ function evaluateForSideToMove(state: VChessState): number {
 }
 
 const MATE_SCORE = 50_000
+const MATE_BOUND = 49_000
 
 export const AI_MAX_PLY = 8
 
@@ -84,8 +84,35 @@ function isOutOfTime(ctx: SearchContext): boolean {
   return Date.now() >= ctx.deadline
 }
 
+/** --- Repetition table --- */
+const REP_TABLE_SIZE = 1024
+const repTable = new BigUint64Array(REP_TABLE_SIZE)
+let repCount = 0
+
+function repClear(): void {
+  repCount = 0
+}
+
+function repPush(hash: bigint): void {
+  if (repCount < REP_TABLE_SIZE) {
+    repTable[repCount] = hash
+  }
+  repCount++
+}
+
+function repPop(): void {
+  if (repCount > 0) repCount--
+}
+
+function isRepetition(hash: bigint): boolean {
+  for (let i = 0; i < repCount && i < REP_TABLE_SIZE; i++) {
+    if (repTable[i] === hash) return true
+  }
+  return false
+}
+
 /** --- Transposition table --- */
-const TT_SIZE = 1 << 16
+const TT_SIZE = 1 << 17
 const ttHash = new BigUint64Array(TT_SIZE)
 const ttDepth = new Int16Array(TT_SIZE)
 const ttScore = new Int32Array(TT_SIZE)
@@ -131,7 +158,7 @@ function decodeMoveFromTT(idx: number): Move | null {
 }
 
 function ttReadIndex(hash: bigint): number {
-  return Number(hash % BigInt(TT_SIZE))
+  return Number(hash & BigInt(TT_SIZE - 1))
 }
 
 function ttProbe(
@@ -139,14 +166,18 @@ function ttProbe(
   depth: number,
   alpha: number,
   beta: number,
+  ply: number,
 ): { score: number; move: Move | null } | null {
   const idx = ttReadIndex(hash)
   if (ttDepth[idx]! < 0 || ttHash[idx] !== hash) return null
   if (ttDepth[idx]! < depth) return null
 
-  const score = ttScore[idx]!
+  let score = ttScore[idx]!
   const flag = ttFlag[idx]!
   const move = decodeMoveFromTT(idx)
+
+  if (score < -MATE_BOUND) score += ply
+  if (score > MATE_BOUND) score -= ply
 
   if (flag === 1) return { score, move }
   if (flag === 2 && score >= beta) return { score, move }
@@ -166,14 +197,19 @@ function ttStore(
   score: number,
   flag: 1 | 2 | 3,
   best: Move | null,
+  ply: number,
 ): void {
   const idx = ttReadIndex(hash)
   const oldD = ttDepth[idx]!
   if (oldD >= 0 && ttHash[idx] === hash && oldD > depth) return
 
+  let s = score
+  if (s < -MATE_BOUND) s -= ply
+  if (s > MATE_BOUND) s += ply
+
   ttHash[idx] = hash
   ttDepth[idx] = depth
-  ttScore[idx] = score
+  ttScore[idx] = s
   ttFlag[idx] = flag
   if (best) encodeMoveToTT(best, idx)
 }
@@ -247,10 +283,12 @@ const MAX_Q_PLY = 12
 
 function pushNullMove(state: VChessState): void {
   state.turn = state.turn === 'red' ? 'black' : 'red'
+  state.hash ^= zobristSideToMove
 }
 
 function popNullMove(state: VChessState): void {
   state.turn = state.turn === 'red' ? 'black' : 'red'
+  state.hash ^= zobristSideToMove
 }
 
 function quiescence(
@@ -271,18 +309,18 @@ function quiescence(
     if (standPat > alpha) alpha = standPat
   }
 
-  const status = getGameStatus(state)
-  if (status === 'checkmate') return -MATE_SCORE + ply
-  if (status === 'stalemate') return 0
-
   const moves = inCheck ? getAllLegalMoves(state) : getLegalCaptures(state)
+
+  if (inCheck && moves.length === 0) return -MATE_SCORE + ply
   if (moves.length === 0) return alpha
 
   const ordered = sortMoves(state, moves, null, null, ply)
 
   for (const move of ordered) {
-    if (!tryPushMove(state, move)) continue
+    if (!searchPushMove(state, move)) continue
+    repPush(state.hash)
     const child = quiescence(state, -beta, -alpha, ply + 1, ctx)
+    repPop()
     popMove(state)
     if (child === null) return null
     const score = -child
@@ -303,18 +341,16 @@ function negamax(
 ): number | null {
   if (isOutOfTime(ctx)) return null
 
-  const hash = computeHash(state)
+  const hash = state.hash
 
-  const ttHit = ttProbe(hash, depth, alpha, beta)
-  if (ttHit) {
+  if (ply > 0 && isRepetition(hash)) return 0
+
+  const ttHit = ttProbe(hash, depth, alpha, beta, ply)
+  if (ttHit && ply > 0) {
     return ttHit.score
   }
 
   const ttMove = ttGetBestMove(hash)
-
-  const status = getGameStatus(state)
-  if (status === 'checkmate') return -MATE_SCORE + ply
-  if (status === 'stalemate') return 0
 
   const inCheck = isInCheck(state, state.turn)
   let eDepth = depth
@@ -326,14 +362,16 @@ function negamax(
 
   if (allowNull && !inCheck && depth >= NULL_MIN_DEPTH && eDepth > NULL_R + 1) {
     pushNullMove(state)
-    const nullChild = negamax(state, eDepth - 1 - NULL_R, -beta, -alpha, ply + 1, ctx, false)
+    const nullChild = negamax(state, eDepth - 1 - NULL_R, -beta, -beta + 1, ply + 1, ctx, false)
     popNullMove(state)
     if (nullChild === null) return null
     if (-nullChild >= beta) return beta
   }
 
   const moves = getAllLegalMoves(state)
-  if (moves.length === 0) return -MATE_SCORE + ply
+  if (moves.length === 0) {
+    return inCheck ? -MATE_SCORE + ply : 0
+  }
 
   const ordered = sortMoves(state, moves, ttMove, null, ply)
 
@@ -343,8 +381,9 @@ function negamax(
 
   for (let i = 0; i < ordered.length; i++) {
     const move = ordered[i]!
-    if (!tryPushMove(state, move)) continue
+    if (!searchPushMove(state, move)) continue
 
+    repPush(state.hash)
     const oppInCheck = isInCheck(state, state.turn)
     let reduction = 0
     if (i > 3 && eDepth > 2 && move.type !== 'capture' && !inCheck && !oppInCheck) {
@@ -364,6 +403,7 @@ function negamax(
       }
     }
 
+    repPop()
     popMove(state)
     if (childScore === null) return null
 
@@ -381,7 +421,7 @@ function negamax(
         const hi = histIdx(move.from, move.to)
         history[hi] = Math.min(history[hi]! + depth * depth, 1_000_000_000)
       }
-      ttStore(hash, depth, beta, 2, move)
+      ttStore(hash, depth, beta, 2, move, ply)
       return beta
     }
   }
@@ -390,7 +430,7 @@ function negamax(
   if (bestScore <= oldAlpha) flag = 3
   else if (bestScore >= beta) flag = 2
 
-  ttStore(hash, depth, bestScore, flag, best)
+  ttStore(hash, depth, bestScore, flag, best, ply)
   return bestScore
 }
 
@@ -412,6 +452,7 @@ export function findBestMoveSync(state: VChessState, budgetMs: number): SearchRe
 
   ttClear()
   clearKillersAndHistory()
+  repClear()
 
   for (let depth = 1; depth <= AI_MAX_PLY; depth++) {
     if (Date.now() >= deadline) break
@@ -431,8 +472,10 @@ export function findBestMoveSync(state: VChessState, budgetMs: number): SearchRe
         break
       }
 
-      if (!tryPushMove(root, move)) continue
+      if (!searchPushMove(root, move)) continue
+      repPush(root.hash)
       const child = negamax(root, depth - 1, -beta, -alpha, 1, ctx, true)
+      repPop()
       popMove(root)
       if (child === null) {
         bestMove = null

@@ -50,8 +50,8 @@ const clockSettings = useLocalStorage<VChessClockSettings>('vchess-clock-setting
 }))
 
 /** Bản nháp trên màn «Chơi với máy» — đồng bộ khi mở màn. */
-const aiSetupMinutes = ref(VCHESS_CLOCK_DEFAULTS.initialMinutes)
-const aiSetupIncrement = ref(VCHESS_CLOCK_DEFAULTS.incrementSeconds)
+const aiSetupMinutes = ref<number>(VCHESS_CLOCK_DEFAULTS.initialMinutes)
+const aiSetupIncrement = ref<number>(VCHESS_CLOCK_DEFAULTS.incrementSeconds)
 
 const initialMinutesForClock = computed(() => {
   const src = matchClockSettings.value

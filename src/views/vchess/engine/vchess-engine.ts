@@ -1,3 +1,11 @@
+import {
+  computeHash,
+  zobristKingTwoBlack,
+  zobristKingTwoRed,
+  zobristPieceKey,
+  zobristSideToMove,
+} from './vchess-zobrist'
+
 export const BOARD_ROWS = 11
 export const BOARD_COLS = 9
 
@@ -56,6 +64,8 @@ export interface VChessState {
   history: MoveRecord[]
   /** Chỉ số mailbox của vua; `-1` nếu không có. */
   kingSq: Record<Side, number>
+  /** Zobrist hash — cập nhật incremental khi apply/unapply. */
+  hash: bigint
 }
 
 const FILES = ['1', '2', '3', '4', '5', '6', '7', '8', '9'] as const
@@ -72,11 +82,61 @@ function rcToSqInternal(row: number, col: number): number {
   return (row + RANK_PAD) * MAILBOX_WIDTH + (col + FILE_PAD)
 }
 
+const M_DIAG_NW = M_NORTH + M_WEST
+const M_DIAG_NE = M_NORTH + M_EAST
+const M_DIAG_SW = M_SOUTH + M_WEST
+const M_DIAG_SE = M_SOUTH + M_EAST
+
 const KNIGHT_MAIL = [
   { leg: M_SOUTH, targets: [M_SOUTH + M_SOUTH + M_EAST, M_SOUTH + M_SOUTH + M_WEST] as const },
   { leg: M_NORTH, targets: [M_NORTH + M_NORTH + M_EAST, M_NORTH + M_NORTH + M_WEST] as const },
   { leg: M_EAST, targets: [M_SOUTH + M_EAST + M_EAST, M_NORTH + M_EAST + M_EAST] as const },
   { leg: M_WEST, targets: [M_SOUTH + M_WEST + M_WEST, M_NORTH + M_WEST + M_WEST] as const },
+] as const
+
+/** Reverse knight attack: from target, check diagonal legs then knight positions. */
+const KNIGHT_ATTACK_MAP = [
+  { leg: M_DIAG_NW, knights: [2 * M_NORTH + M_WEST, M_NORTH + 2 * M_WEST] as const },
+  { leg: M_DIAG_NE, knights: [2 * M_NORTH + M_EAST, M_NORTH + 2 * M_EAST] as const },
+  { leg: M_DIAG_SW, knights: [2 * M_SOUTH + M_WEST, M_SOUTH + 2 * M_WEST] as const },
+  { leg: M_DIAG_SE, knights: [2 * M_SOUTH + M_EAST, M_SOUTH + 2 * M_EAST] as const },
+] as const
+
+/** Reverse pawn attack offsets — where an enemy pawn could be to attack targetSq. */
+const PAWN_ATK_OFFSETS = {
+  red: [M_NORTH, M_DIAG_NE, M_DIAG_NW] as const,
+  black: [M_SOUTH, M_DIAG_SE, M_DIAG_SW] as const,
+} as const
+
+/** Reverse gunner attack: { pos: offset from target to gunner, leg: offset from target to gunner's front }. */
+const GUNNER_ATK_ENTRIES = {
+  red: [
+    { pos: 2 * M_NORTH + M_EAST, leg: M_NORTH + M_EAST },
+    { pos: 2 * M_NORTH, leg: M_NORTH },
+    { pos: 2 * M_NORTH + M_WEST, leg: M_NORTH + M_WEST },
+  ] as const,
+  black: [
+    { pos: 2 * M_SOUTH + M_EAST, leg: M_SOUTH + M_EAST },
+    { pos: 2 * M_SOUTH, leg: M_SOUTH },
+    { pos: 2 * M_SOUTH + M_WEST, leg: M_SOUTH + M_WEST },
+  ] as const,
+} as const
+
+/** Reverse eagle (ground) attack offsets. */
+const EAGLE_ATK_OFFSETS = {
+  red: [M_DIAG_NE, M_DIAG_NW] as const,
+  black: [M_DIAG_SE, M_DIAG_SW] as const,
+} as const
+
+const KING_ALL_DIRS = [
+  M_NORTH,
+  M_SOUTH,
+  M_WEST,
+  M_EAST,
+  M_DIAG_NW,
+  M_DIAG_NE,
+  M_DIAG_SW,
+  M_DIAG_SE,
 ] as const
 
 const KING_DIRECTIONS: Position[] = [
@@ -216,8 +276,10 @@ export function createStateFromBoard(
       },
     })),
     kingSq: { red: -1, black: -1 },
+    hash: 0n,
   }
   recomputeKingSq(state)
+  state.hash = computeHash(state)
   return state
 }
 
@@ -231,6 +293,7 @@ export function createInitialState(): VChessState {
     kingTwoStepAvailable: { red: true, black: true },
     history: [],
     kingSq: { red: -1, black: -1 },
+    hash: 0n,
   }
 
   const redMajor = createMajorRow('red')
@@ -266,6 +329,7 @@ export function createInitialState(): VChessState {
   setPieceState(state, { row: 7, col: 8 }, { side: 'black', kind: 'pawn' })
 
   recomputeKingSq(state)
+  state.hash = computeHash(state)
   return state
 }
 
@@ -296,6 +360,7 @@ export function cloneState(state: VChessState): VChessState {
       },
     })),
     kingSq: { red: state.kingSq.red, black: state.kingSq.black },
+    hash: state.hash,
   }
   return next
 }
@@ -357,7 +422,7 @@ function generateRookMoves(state: VChessState, piece: Piece, from: Position): Mo
     while (true) {
       sq += dir
       if (!isPlayableMailboxSq(sq)) break
-      const target = state.mailbox[sq]
+      const target = state.mailbox[sq] ?? null
       const to = mailboxSqToRc(sq)
       if (target === null) {
         moves.push({ from, to, type: 'move' })
@@ -589,150 +654,131 @@ export function findKing(state: VChessState, side: Side): Position | null {
   return mailboxSqToRc(sq)
 }
 
-function isRookAttackingMailbox(state: VChessState, fromSq: number, toSq: number): boolean {
-  const from = mailboxSqToRc(fromSq)
-  const to = mailboxSqToRc(toSq)
-  if (from.row !== to.row && from.col !== to.col) return false
-  const rowStep = from.row === to.row ? 0 : from.row < to.row ? 1 : -1
-  const colStep = from.col === to.col ? 0 : from.col < to.col ? 1 : -1
-  let r = from.row + rowStep
-  let c = from.col + colStep
-  while (r !== to.row || c !== to.col) {
-    if (pieceAt(state, { row: r, col: c }) !== null) return false
-    r += rowStep
-    c += colStep
-  }
-  return true
+/** Safe mailbox access — returns null for undefined (off-board sentinel). */
+function mbAt(mb: (Piece | null)[], sq: number): Piece | null {
+  return mb[sq] ?? null
 }
 
-function isKnightAttackingMailbox(state: VChessState, fromSq: number, toSq: number): boolean {
-  for (const rule of KNIGHT_MAIL) {
-    const legSq = fromSq + rule.leg
-    if (!isPlayableMailboxSq(legSq) || state.mailbox[legSq] !== null) continue
-    for (const tOff of rule.targets) {
-      if (fromSq + tOff === toSq) return true
-    }
-  }
-  return false
-}
-
-function isPawnAttacking(piece: Piece, from: Position, to: Position): boolean {
-  return getPawnTargets(piece, from).some(
-    (target) => target.row === to.row && target.col === to.col,
-  )
-}
-
-function isGunnerAttacking(
-  state: VChessState,
-  piece: Piece,
-  from: Position,
-  to: Position,
-): boolean {
-  const front = { row: from.row + forwardDelta(piece.side), col: from.col }
-  if (!isInsideBoard(front) || pieceAt(state, front) !== null) return false
-  return getGunnerTargets(piece, from).some(
-    (target) => target.row === to.row && target.col === to.col,
-  )
-}
-
-function isElephantAttacking(
-  state: VChessState,
-  piece: Piece,
-  from: Position,
-  to: Position,
-): boolean {
-  const dir = forwardDelta(piece.side)
-  const front = { row: from.row + dir, col: from.col }
-  const frontPiece = pieceAt(state, front)
-
-  if (isAlly(frontPiece, piece.side)) {
-    return (
-      (to.row === from.row + dir && to.col === from.col - 1) ||
-      (to.row === from.row + dir && to.col === from.col + 1)
-    )
-  }
-
-  if (isPawnAttacking(piece, from, to)) return true
-  if (frontPiece === null && isGunnerAttacking(state, piece, from, to)) return true
-  return false
-}
-
-function isKingAttacking(state: VChessState, piece: Piece, from: Position, to: Position): boolean {
-  const rowDiff = Math.abs(from.row - to.row)
-  const colDiff = Math.abs(from.col - to.col)
-  if (rowDiff <= 1 && colDiff <= 1) return !(rowDiff === 0 && colDiff === 0)
-
-  if (!state.kingTwoStepAvailable[piece.side]) return false
-  if (rowDiff > 2 || colDiff > 2) return false
-  if (!(rowDiff === 0 || colDiff === 0 || rowDiff === colDiff)) return false
-  if (Math.max(rowDiff, colDiff) !== 2) return false
-
-  const rowStep = to.row > from.row ? 1 : to.row < from.row ? -1 : 0
-  const colStep = to.col > from.col ? 1 : to.col < from.col ? -1 : 0
-  const middle = { row: from.row + rowStep, col: from.col + colStep }
-  return pieceAt(state, middle) === null
-}
-
-function isEagleAttacking(piece: Piece, from: Position, to: Position): boolean {
-  if (piece.eagleMode === 'flying') return false
-  const dir = forwardDelta(piece.side)
-  return (
-    (to.row === from.row + dir && to.col === from.col - 1) ||
-    (to.row === from.row + dir && to.col === from.col + 1)
-  )
-}
-
-function isAssassinAttackingMailbox(
-  state: VChessState,
-  piece: Piece,
-  fromSq: number,
-  toSq: number,
-): boolean {
-  for (const dir of MAIL_ROOK_DIRS) {
-    let step = 1
-    while (true) {
-      const sq = fromSq + dir * step
-      if (!isPlayableMailboxSq(sq)) break
-      const blocker = state.mailbox[sq]
-      if (blocker === null) {
-        step++
-        continue
-      }
-
-      if (blocker.side === piece.side) break
-      if (sq !== toSq) break
-
-      const behind = toSq + dir
-      return isPlayableMailboxSq(behind) && state.mailbox[behind] === null
-    }
-  }
-  return false
-}
-
+/**
+ * Efficient attack detection — looks OUTWARD from target instead of iterating all squares.
+ * O(directions) instead of O(99).
+ */
 function isSquareAttacked(state: VChessState, targetSq: number, bySide: Side): boolean {
-  for (const sq of PLAYABLE_SQ) {
-    const piece = state.mailbox[sq]
-    if (!piece || piece.side !== bySide) continue
-    const from = mailboxSqToRc(sq)
-    const to = mailboxSqToRc(targetSq)
-    const attacks =
-      piece.kind === 'rook'
-        ? isRookAttackingMailbox(state, sq, targetSq)
-        : piece.kind === 'knight'
-          ? isKnightAttackingMailbox(state, sq, targetSq)
-          : piece.kind === 'elephant'
-            ? isElephantAttacking(state, piece, from, to)
-            : piece.kind === 'gunner'
-              ? isGunnerAttacking(state, piece, from, to)
-              : piece.kind === 'king'
-                ? isKingAttacking(state, piece, from, to)
-                : piece.kind === 'pawn'
-                  ? isPawnAttacking(piece, from, to)
-                  : piece.kind === 'assassin'
-                    ? isAssassinAttackingMailbox(state, piece, sq, targetSq)
-                    : isEagleAttacking(piece, from, to)
-    if (attacks) return true
+  const mb = state.mailbox
+
+  // Rook: orthogonal rays — first piece found on each ray
+  for (const d of MAIL_ROOK_DIRS) {
+    let sq = targetSq + d
+    while (isPlayableMailboxSq(sq)) {
+      const p = mbAt(mb, sq)
+      if (p !== null) {
+        if (p.side === bySide && p.kind === 'rook') return true
+        break
+      }
+      sq += d
+    }
   }
+
+  // Knight: check 4 diagonal legs, then 2 knight positions per leg
+  for (const { leg, knights } of KNIGHT_ATTACK_MAP) {
+    const legSq = targetSq + leg
+    if (!isPlayableMailboxSq(legSq) || mbAt(mb, legSq) !== null) continue
+    for (const kOff of knights) {
+      const kSq = targetSq + kOff
+      if (!isPlayableMailboxSq(kSq)) continue
+      const p = mbAt(mb, kSq)
+      if (p !== null && p.side === bySide && p.kind === 'knight') return true
+    }
+  }
+
+  // Pawn: check 3 reverse-attack positions
+  const pawnOffs = PAWN_ATK_OFFSETS[bySide]
+  for (const off of pawnOffs) {
+    const sq = targetSq + off
+    if (!isPlayableMailboxSq(sq)) continue
+    const p = mbAt(mb, sq)
+    if (p !== null && p.side === bySide && p.kind === 'pawn') return true
+  }
+
+  // Gunner: check 3 positions with front-leg empty
+  const gunnerEntries = GUNNER_ATK_ENTRIES[bySide]
+  for (const { pos, leg } of gunnerEntries) {
+    const gSq = targetSq + pos
+    if (!isPlayableMailboxSq(gSq)) continue
+    const p = mbAt(mb, gSq)
+    if (!p || p.side !== bySide || p.kind !== 'gunner') continue
+    const legSq = targetSq + leg
+    if (!isPlayableMailboxSq(legSq) || mbAt(mb, legSq) !== null) continue
+    return true
+  }
+
+  // Elephant — pawn-like attacks (3 positions, same offsets as pawn reverse)
+  const eStraightOff = bySide === 'red' ? M_NORTH : M_SOUTH
+  for (const off of pawnOffs) {
+    const eSq = targetSq + off
+    if (!isPlayableMailboxSq(eSq)) continue
+    const p = mbAt(mb, eSq)
+    if (!p || p.side !== bySide || p.kind !== 'elephant') continue
+    if (off === eStraightOff) {
+      const tp = mbAt(mb, targetSq)
+      if (tp !== null && tp.side === bySide) continue
+    }
+    return true
+  }
+  // Elephant — gunner-like attacks (3 positions, front must be empty)
+  for (const { pos, leg } of gunnerEntries) {
+    const eSq = targetSq + pos
+    if (!isPlayableMailboxSq(eSq)) continue
+    const p = mbAt(mb, eSq)
+    if (!p || p.side !== bySide || p.kind !== 'elephant') continue
+    const legSq = targetSq + leg
+    if (!isPlayableMailboxSq(legSq) || mbAt(mb, legSq) !== null) continue
+    return true
+  }
+
+  // King: 8 neighbours + optional 2-step
+  for (const d of KING_ALL_DIRS) {
+    const sq = targetSq + d
+    if (!isPlayableMailboxSq(sq)) continue
+    const p = mbAt(mb, sq)
+    if (p !== null && p.side === bySide && p.kind === 'king') return true
+  }
+  if (state.kingTwoStepAvailable[bySide]) {
+    for (const d of KING_ALL_DIRS) {
+      const midSq = targetSq + d
+      if (!isPlayableMailboxSq(midSq) || mbAt(mb, midSq) !== null) continue
+      const kSq = targetSq + 2 * d
+      if (!isPlayableMailboxSq(kSq)) continue
+      const p = mbAt(mb, kSq)
+      if (p !== null && p.side === bySide && p.kind === 'king') return true
+    }
+  }
+
+  // Eagle (ground): 2 diagonal-forward positions
+  const eagleOffs = EAGLE_ATK_OFFSETS[bySide]
+  for (const off of eagleOffs) {
+    const sq = targetSq + off
+    if (!isPlayableMailboxSq(sq)) continue
+    const p = mbAt(mb, sq)
+    if (p !== null && p.side === bySide && p.kind === 'eagle' && p.eagleMode !== 'flying')
+      return true
+  }
+
+  // Assassin: for each direction, check behind target is empty, then scan opposite for assassin
+  for (const d of MAIL_ROOK_DIRS) {
+    const behindSq = targetSq + d
+    if (!isPlayableMailboxSq(behindSq) || mbAt(mb, behindSq) !== null) continue
+    let sq = targetSq - d
+    while (isPlayableMailboxSq(sq)) {
+      const p = mbAt(mb, sq)
+      if (p !== null) {
+        if (p.side === bySide && p.kind === 'assassin') return true
+        break
+      }
+      sq -= d
+    }
+  }
+
   return false
 }
 
@@ -753,25 +799,38 @@ function applyMoveUnsafe(state: VChessState, move: Move): MoveRecord | null {
   let capturedPiece: Piece | null = null
   if (move.type === 'capture' && move.captureSquare) {
     capturedPiece = pieceAt(state, move.captureSquare)
+    if (capturedPiece) {
+      state.hash ^= zobristPieceKey(capturedPiece, move.captureSquare.row, move.captureSquare.col)
+      if (capturedPiece.kind === 'king') state.kingSq[capturedPiece.side] = -1
+    }
     setPieceState(state, move.captureSquare, null)
   }
 
   if (move.type === 'flip') {
     if (movingPiece.kind !== 'eagle' || movingPiece.eagleMode === 'flying') return null
+    state.hash ^= zobristPieceKey(movingPiece, move.from.row, move.from.col)
     movingPiece.eagleMode = 'flying'
+    state.hash ^= zobristPieceKey(movingPiece, move.from.row, move.from.col)
   } else {
+    state.hash ^= zobristPieceKey(movedPieceBefore, move.from.row, move.from.col)
     setPieceState(state, move.from, null)
     const pieceAfterMove = clonePiece(movingPiece)
     if (pieceAfterMove.kind === 'eagle' && pieceAfterMove.eagleMode === 'flying') {
       pieceAfterMove.eagleMode = 'ground'
     }
     setPieceState(state, move.to, pieceAfterMove)
+    state.hash ^= zobristPieceKey(pieceAfterMove, move.to.row, move.to.col)
+
     if (movedPieceBefore.kind === 'king') {
-      state.kingTwoStepAvailable[movedPieceBefore.side] = false
+      state.kingSq[movedPieceBefore.side] = rcToSqInternal(move.to.row, move.to.col)
+      if (state.kingTwoStepAvailable[movedPieceBefore.side]) {
+        state.hash ^= movedPieceBefore.side === 'red' ? zobristKingTwoRed : zobristKingTwoBlack
+        state.kingTwoStepAvailable[movedPieceBefore.side] = false
+      }
     }
   }
 
-  recomputeKingSq(state)
+  state.hash ^= zobristSideToMove
 
   return {
     move: {
@@ -789,25 +848,45 @@ function applyMoveUnsafe(state: VChessState, move: Move): MoveRecord | null {
 function unapplyMove(state: VChessState, record: MoveRecord): void {
   const { move, movedPiece, capturedPiece, kingTwoStepAvailableBefore } = record
 
+  state.hash ^= zobristSideToMove
+
   if (move.type === 'flip') {
     const p = pieceAt(state, move.from)
-    if (p?.kind === 'eagle') p.eagleMode = 'ground'
-    state.kingTwoStepAvailable.red = kingTwoStepAvailableBefore.red
-    state.kingTwoStepAvailable.black = kingTwoStepAvailableBefore.black
-    state.turn = movedPiece.side
-    recomputeKingSq(state)
-    return
+    if (p?.kind === 'eagle') {
+      state.hash ^= zobristPieceKey(p, move.from.row, move.from.col)
+      p.eagleMode = 'ground'
+      state.hash ^= zobristPieceKey(p, move.from.row, move.from.col)
+    }
+  } else {
+    const landed = pieceAt(state, move.to)
+    if (landed) state.hash ^= zobristPieceKey(landed, move.to.row, move.to.col)
+    setPieceState(state, move.to, null)
+
+    const restored = clonePiece(movedPiece)
+    setPieceState(state, move.from, restored)
+    state.hash ^= zobristPieceKey(restored, move.from.row, move.from.col)
+
+    if (move.type === 'capture' && capturedPiece && move.captureSquare) {
+      const cap = clonePiece(capturedPiece)
+      setPieceState(state, move.captureSquare, cap)
+      state.hash ^= zobristPieceKey(cap, move.captureSquare.row, move.captureSquare.col)
+      if (cap.kind === 'king') {
+        state.kingSq[cap.side] = rcToSqInternal(move.captureSquare.row, move.captureSquare.col)
+      }
+    }
+
+    if (movedPiece.kind === 'king') {
+      state.kingSq[movedPiece.side] = rcToSqInternal(move.from.row, move.from.col)
+    }
   }
 
-  setPieceState(state, move.to, null)
-  setPieceState(state, move.from, clonePiece(movedPiece))
-  if (move.type === 'capture' && capturedPiece && move.captureSquare) {
-    setPieceState(state, move.captureSquare, clonePiece(capturedPiece))
-  }
+  const wasRedAvail = state.kingTwoStepAvailable.red
+  const wasBlackAvail = state.kingTwoStepAvailable.black
   state.kingTwoStepAvailable.red = kingTwoStepAvailableBefore.red
   state.kingTwoStepAvailable.black = kingTwoStepAvailableBefore.black
+  if (wasRedAvail !== state.kingTwoStepAvailable.red) state.hash ^= zobristKingTwoRed
+  if (wasBlackAvail !== state.kingTwoStepAvailable.black) state.hash ^= zobristKingTwoBlack
   state.turn = movedPiece.side
-  recomputeKingSq(state)
 }
 
 function getKingTwoStepMiddle(from: Position, to: Position): Position | null {
@@ -960,6 +1039,23 @@ export function getGameStatus(state: VChessState): GameStatus {
   const hasMoves = getAllLegalMoves(state).length > 0
   if (hasMoves) return 'playing'
   return isInCheck(state, state.turn) ? 'checkmate' : 'stalemate'
+}
+
+/**
+ * Lightweight move apply for search — skips pseudo move re-generation and
+ * legality re-check since search already got legal moves from getAllLegalMoves.
+ */
+export function searchPushMove(state: VChessState, move: Move): boolean {
+  const record = applyMoveUnsafe(state, move)
+  if (!record) return false
+  const mover = state.turn
+  if (!isKingSafeForMover(state, mover)) {
+    unapplyMove(state, record)
+    return false
+  }
+  state.history.push(record)
+  state.turn = state.turn === 'red' ? 'black' : 'red'
+  return true
 }
 
 export function pieceToGlyph(piece: Piece | null): string {

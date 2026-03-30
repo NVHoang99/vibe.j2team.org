@@ -112,6 +112,7 @@ function pstTableForKind(kind: Piece['kind']): Grid | null {
 export function pstBonusForPiece(piece: Piece, absoluteRow: number, absoluteCol: number): number {
   const { r, c } = orientedCoords(piece.side, absoluteRow, absoluteCol)
   const table = pstTableForKind(piece.kind)
+  if (!table) return 0
   return table[r]?.[c] ?? 0
 }
 

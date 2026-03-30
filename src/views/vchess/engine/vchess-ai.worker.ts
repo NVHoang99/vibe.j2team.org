@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 import type { VChessState } from './vchess-engine'
 import { findBestMoveSync, randomAiSearchBudgetMs, type SearchResult } from './vchess-search'
+import { computeHash } from './vchess-zobrist'
 
 export type VChessAiWorkerIn = {
   type: 'search'
@@ -17,6 +18,7 @@ self.onmessage = (event: MessageEvent<VChessAiWorkerIn>) => {
   if (msg.type !== 'search') return
   const { id, state } = msg
   try {
+    state.hash = computeHash(state)
     const result = findBestMoveSync(state, randomAiSearchBudgetMs())
     const out: VChessAiWorkerOut = { type: 'result', id, result }
     self.postMessage(out)

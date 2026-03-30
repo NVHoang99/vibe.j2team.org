@@ -8,7 +8,11 @@ let requestSeq = 0
 
 /** Plain object — tránh Proxy Vue khi postMessage / structuredClone (DataCloneError). */
 function stateForWorker(state: VChessState): VChessState {
-  return JSON.parse(JSON.stringify(state)) as VChessState
+  const plain = JSON.parse(
+    JSON.stringify(state, (_, v) => (typeof v === 'bigint' ? null : v)),
+  ) as VChessState
+  plain.hash = 0n
+  return plain
 }
 
 export function useVchessAiWorker() {

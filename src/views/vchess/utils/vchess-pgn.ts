@@ -94,7 +94,7 @@ function parseMoveToken(token: string): Move | null {
   }
 
   const assassin = /^([a-k][1-9])x([a-k][1-9])>([a-k][1-9])$/.exec(t)
-  if (assassin) {
+  if (assassin?.[1] && assassin[2] && assassin[3]) {
     const from = coordinateToPosition(assassin[1])
     const victim = coordinateToPosition(assassin[2])
     const to = coordinateToPosition(assassin[3])
@@ -103,7 +103,7 @@ function parseMoveToken(token: string): Move | null {
   }
 
   const cap = /^([a-k][1-9])x([a-k][1-9])$/.exec(t)
-  if (cap) {
+  if (cap?.[1] && cap[2]) {
     const from = coordinateToPosition(cap[1])
     const sq = coordinateToPosition(cap[2])
     if (!from || !sq) return null
@@ -111,7 +111,7 @@ function parseMoveToken(token: string): Move | null {
   }
 
   const quiet = /^([a-k][1-9])-([a-k][1-9])$/.exec(t)
-  if (quiet) {
+  if (quiet?.[1] && quiet[2]) {
     const from = coordinateToPosition(quiet[1])
     const to = coordinateToPosition(quiet[2])
     if (!from || !to) return null
@@ -144,9 +144,10 @@ export function extractMoveTokens(text: string): string[] {
 export function parseMoveTokens(tokens: string[]): Move[] | { error: string } {
   const moves: Move[] = []
   for (let i = 0; i < tokens.length; i++) {
-    const m = parseMoveToken(tokens[i])
+    const tok = tokens[i] ?? ''
+    const m = parseMoveToken(tok)
     if (!m) {
-      return { error: `Không hiểu nước thứ ${i + 1}: "${tokens[i]}"` }
+      return { error: `Không hiểu nước thứ ${i + 1}: "${tok}"` }
     }
     moves.push(m)
   }
@@ -164,9 +165,9 @@ export function parsePgnHeaders(text: string): VchessPgnMeta {
   for (const line of text.split(/\r?\n/)) {
     const t = line.trim()
     const v = HEADER_VCHESS.exec(t)
-    if (v) formatVersion = v[1]
+    if (v?.[1]) formatVersion = v[1]
     const m = HEADER_MODE.exec(t)
-    if (m) mode = m[1]
+    if (m?.[1]) mode = m[1]
   }
   return { formatVersion, mode }
 }

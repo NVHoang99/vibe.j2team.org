@@ -1,13 +1,17 @@
 /**
  * Zobrist hashing cho vChess — dùng transposition table.
+ * Export đủ internals để engine dùng incremental hashing.
  */
 
 import { BOARD_COLS, BOARD_ROWS, type Piece, type VChessState } from './vchess-engine'
 
 const SQ = BOARD_ROWS * BOARD_COLS
 
-/** Mã hóa loại quân (kèm phe) để tra bảng ngẫu nhiên — tối đa ~20 biến thể. */
-function pieceVariantIndex(p: Piece): number {
+export function zobristSquareIndex(row: number, col: number): number {
+  return row * BOARD_COLS + col
+}
+
+export function pieceVariantIndex(p: Piece): number {
   const sideOff = p.side === 'red' ? 0 : 9
   switch (p.kind) {
     case 'rook':
@@ -46,35 +50,31 @@ function makeSeeded(seed: bigint): () => bigint {
   }
 }
 
-/** Bảng khóa (64-bit) — khởi tạo một lần. */
 const rnd = makeSeeded(0x564348455353n)
 
-const zobristPiece: bigint[][] = Array.from({ length: SQ }, () =>
+export const zobristPiece: bigint[][] = Array.from({ length: SQ }, () =>
   Array.from({ length: NUM_PIECE_KEYS }, () => rnd()),
 )
 
-const zobristSideToMove: bigint = rnd()
-const zobristKingTwoRed: bigint = rnd()
-const zobristKingTwoBlack: bigint = rnd()
+export const zobristSideToMove: bigint = rnd()
+export const zobristKingTwoRed: bigint = rnd()
+export const zobristKingTwoBlack: bigint = rnd()
 
-function squareIndex(row: number, col: number): number {
-  return row * BOARD_COLS + col
+/** XOR key cho một quân tại (row, col). */
+export function zobristPieceKey(piece: Piece, row: number, col: number): bigint {
+  const si = zobristSquareIndex(row, col)
+  const pi = pieceVariantIndex(piece)
+  return zobristPiece[si]![pi]!
 }
 
-/** Hash 64-bit đầy đủ cho vị trí (dùng cho TT). */
+/** Hash 64-bit đầy đủ — dùng khi tạo state ban đầu. */
 export function computeHash(state: VChessState): bigint {
   let h = 0n
   for (let row = 0; row < BOARD_ROWS; row++) {
     for (let col = 0; col < BOARD_COLS; col++) {
       const piece = state.board[row]?.[col]
       if (!piece) continue
-      const si = squareIndex(row, col)
-      const pi = pieceVariantIndex(piece)
-      const rowKeys = zobristPiece[si]
-      if (rowKeys) {
-        const k = rowKeys[pi]
-        if (k !== undefined) h ^= k
-      }
+      h ^= zobristPieceKey(piece, row, col)
     }
   }
   if (state.turn === 'red') h ^= zobristSideToMove
