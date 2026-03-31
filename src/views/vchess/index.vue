@@ -8,7 +8,7 @@ import {
   useMediaQuery,
 } from '@vueuse/core'
 import { computed, ref, shallowRef, watch } from 'vue'
-import { useVchessAiWorker } from './composables/use-vchess-ai-worker'
+import { useVchessAiWorker, type VChessAiSearchOutcome } from './composables/use-vchess-ai-worker'
 import { useVchessClock } from './composables/use-vchess-clock'
 import { useVchessSounds } from './composables/use-vchess-sounds'
 import { VCHESS_CLOCK_DEFAULTS, type VChessClockSettings } from './constants'
@@ -28,6 +28,7 @@ import {
   type Piece,
   type Position,
   type Side,
+  type VChessState,
 } from './engine/vchess-engine'
 import { AI_MAX_PLY, AI_MAX_SEARCH_MS, AI_SEARCH_MS_MIN } from './engine/vchess-search'
 import { getPieceImageSrc } from './piece-images'
@@ -92,6 +93,68 @@ const { playForMoveType } = useVchessSounds()
 const { requestSearch, cancelPendingSearches } = useVchessAiWorker()
 const { copy: copyToClipboard } = useClipboard()
 
+/** Thông báo khi worker / tìm kiếm AI lỗi hoặc không trả nước (vs máy). */
+const aiSearchErrorMessage = ref<string | null>(null)
+const aiRetryBusy = ref(false)
+
+function formatAiSearchFailure(
+  outcome: Extract<VChessAiSearchOutcome, { kind: 'failed' }>,
+): string {
+  switch (outcome.reason) {
+    case 'worker_crash':
+      return 'Web Worker bị lỗi (thường do trình duyệt). Thử «Thử lại»; nếu vẫn lỗi, tải lại trang.'
+    case 'post_message':
+      return 'Không gửi được tác vụ tới máy. Thử «Thử lại» hoặc tải lại trang.'
+    case 'search_exception': {
+      const d = outcome.detail?.trim()
+      const short = d && d.length > 0 ? (d.length > 120 ? `${d.slice(0, 117)}…` : d) : ''
+      return short
+        ? `Lỗi khi tính nước: ${short}. Thử «Thử lại» hoặc «Hoàn nước».`
+        : 'Lỗi khi tính nước. Thử «Thử lại» hoặc «Hoàn nước».'
+    }
+  }
+}
+
+function handleAiSearchOutcome(outcome: VChessAiSearchOutcome, snapshot: VChessState): void {
+  if (outcome.kind === 'cancelled') return
+  if (outcome.kind === 'ok') {
+    aiSearchErrorMessage.value = null
+    gameState.value = makeMove(snapshot, outcome.result.move)
+    selectedSquare.value = null
+    return
+  }
+  if (outcome.kind === 'no_result') {
+    aiSearchErrorMessage.value =
+      'Máy không tìm được nước đi trong thời gian cho phép. Bạn có thể «Thử lại» hoặc «Hoàn nước» để đi lại nước Đỏ.'
+    return
+  }
+  aiSearchErrorMessage.value = formatAiSearchFailure(outcome)
+}
+
+async function retryAiMove() {
+  if (gameMode.value !== 'vs-ai' || screen.value !== 'game') return
+  if (aiGamePaused.value) return
+  if (status.value !== 'playing' || timeoutLoser.value) return
+  if (gameState.value.turn !== 'black') return
+  if (aiRetryBusy.value) return
+
+  aiRetryBusy.value = true
+  aiSearchErrorMessage.value = null
+  const snapshot = gameState.value
+  try {
+    const outcome = await requestSearch(snapshot)
+    if (screen.value !== 'game' || gameMode.value !== 'vs-ai') return
+    if (timeoutLoser.value) return
+    if (gameState.value !== snapshot) return
+    if (gameState.value.turn !== 'black') return
+    if (getGameStatus(gameState.value) !== 'playing') return
+
+    handleAiSearchOutcome(outcome, snapshot)
+  } finally {
+    aiRetryBusy.value = false
+  }
+}
+
 const pgnFeedback = ref('')
 const pgnPasteText = ref('')
 
@@ -134,6 +197,7 @@ function applyPgnImport(text: string) {
     return
   }
   aiGamePaused.value = false
+  aiSearchErrorMessage.value = null
   gameState.value = result
   selectedSquare.value = null
   pgnPasteText.value = ''
@@ -175,6 +239,7 @@ function applyFenFromTextarea() {
     return
   }
   aiGamePaused.value = false
+  aiSearchErrorMessage.value = null
   gameState.value = result
   selectedSquare.value = null
   if (gameMode.value === 'vs-ai' && matchClockSettings.value) {
@@ -258,6 +323,7 @@ function beginVsAiFromSetup() {
   }
   gameMode.value = 'vs-ai'
   aiGamePaused.value = false
+  aiSearchErrorMessage.value = null
   gameState.value = createInitialState()
   selectedSquare.value = null
   screen.value = 'game'
@@ -418,6 +484,14 @@ const headline = computed(() => {
   if (status.value === 'stalemate') return 'Hòa - hết nước đi'
   if (isInCheck(gameState.value, gameState.value.turn))
     return `Đang bị chiếu - lượt ${turnText.value}`
+  if (
+    gameMode.value === 'vs-ai' &&
+    aiSearchErrorMessage.value &&
+    status.value === 'playing' &&
+    !timeoutLoser.value
+  ) {
+    return 'Máy (Đen) chưa đi — xem thông báo'
+  }
   if (isAiThinking.value) return 'Máy (Đen) đang đi…'
   return `Lượt đi: ${turnText.value}`
 })
@@ -437,7 +511,7 @@ watch(
         const snapshot = gameState.value
         if (snapshot.turn !== 'black') return
         const historyLen = snapshot.history.length
-        const result = await requestSearch(snapshot)
+        const outcome = await requestSearch(snapshot)
         if (cancelled) return
         if (screen.value !== 'game' || gameMode.value !== 'vs-ai') return
         if (timeoutLoser.value) return
@@ -445,9 +519,8 @@ watch(
         if (gameState.value.history.length !== historyLen) return
         if (gameState.value.turn !== 'black') return
         if (getGameStatus(gameState.value) !== 'playing') return
-        if (!result) return
-        gameState.value = makeMove(snapshot, result.move)
-        selectedSquare.value = null
+
+        handleAiSearchOutcome(outcome, snapshot)
       })()
     }, 380)
 
@@ -479,6 +552,7 @@ function goMenu() {
   selectedSquare.value = null
   matchClockSettings.value = null
   aiGamePaused.value = false
+  aiSearchErrorMessage.value = null
   cancelPendingSearches()
 }
 
@@ -507,6 +581,7 @@ function backFromRules() {
 function startSoloGame() {
   matchClockSettings.value = null
   aiGamePaused.value = false
+  aiSearchErrorMessage.value = null
   gameMode.value = 'solo'
   gameState.value = createInitialState()
   selectedSquare.value = null
@@ -515,6 +590,7 @@ function startSoloGame() {
 
 function resetGame() {
   aiGamePaused.value = false
+  aiSearchErrorMessage.value = null
   gameState.value = createInitialState()
   selectedSquare.value = null
   if (gameMode.value === 'vs-ai' && matchClockSettings.value) {
@@ -524,6 +600,7 @@ function resetGame() {
 
 function handleUndo() {
   if (!canUndo.value) return
+  aiSearchErrorMessage.value = null
   cancelPendingSearches()
   const before = gameState.value
   if (before.history.length === 0) return
@@ -639,6 +716,16 @@ const lastMoveRecord = computed((): MoveRecord | null => {
 function isLastMoveFromSquare(row: number, col: number): boolean {
   const rec = lastMoveRecord.value
   if (!rec) return false
+  const { from, type } = rec.move
+  if (type === 'flip') return false
+  return from.row === row && from.col === col
+}
+
+/** Lật đại bàng: from === to — tô gradient ô đi + ô đích trên cùng một ô. */
+function isLastMoveFlipSquare(row: number, col: number): boolean {
+  const rec = lastMoveRecord.value
+  if (!rec) return false
+  if (rec.move.type !== 'flip') return false
   const { from } = rec.move
   return from.row === row && from.col === col
 }
@@ -649,6 +736,18 @@ function isLastMoveToSquare(row: number, col: number): boolean {
   const { from, to } = rec.move
   if (from.row === to.row && from.col === to.col) return false
   return to.row === row && to.col === col
+}
+
+/** Sát thủ nhảy bắt: ô quân bị ăn khác ô đích — tô riêng. */
+function isLastMoveAssassinVictimSquare(row: number, col: number): boolean {
+  const rec = lastMoveRecord.value
+  if (!rec) return false
+  const m = rec.move
+  if (m.type !== 'capture' || !m.captureSquare) return false
+  const v = m.captureSquare
+  const t = m.to
+  if (v.row === t.row && v.col === t.col) return false
+  return v.row === row && v.col === col
 }
 
 type GameOverInfo =
@@ -1180,6 +1279,11 @@ function winnerDescription(winner: Side): string {
                         @click="handleSquareClick(displayRow, col - 1)"
                       >
                         <span
+                          v-if="isLastMoveFlipSquare(displayRow, col - 1)"
+                          class="vchess-last-move-flip pointer-events-none absolute inset-0 z-0"
+                          aria-hidden="true"
+                        />
+                        <span
                           v-if="isLastMoveFromSquare(displayRow, col - 1)"
                           class="vchess-last-move-from pointer-events-none absolute inset-0 z-0"
                           aria-hidden="true"
@@ -1187,6 +1291,11 @@ function winnerDescription(winner: Side): string {
                         <span
                           v-if="isLastMoveToSquare(displayRow, col - 1)"
                           class="vchess-last-move-to pointer-events-none absolute inset-0 z-0"
+                          aria-hidden="true"
+                        />
+                        <span
+                          v-if="isLastMoveAssassinVictimSquare(displayRow, col - 1)"
+                          class="vchess-last-move-assassin-victim pointer-events-none absolute inset-0 z-0"
                           aria-hidden="true"
                         />
                         <span
@@ -1411,6 +1520,37 @@ function winnerDescription(winner: Side): string {
         <div class="border border-border-default bg-bg-elevated p-3">
           <p class="font-display text-xs tracking-widest text-accent-amber">// Lượt đi</p>
           <p class="mt-2 text-sm font-medium text-text-primary">{{ headline }}</p>
+          <div
+            v-if="aiSearchErrorMessage && gameMode === 'vs-ai'"
+            class="mt-3 border border-accent-coral/40 bg-bg-deep/50 p-3 text-sm"
+            role="alert"
+            aria-live="assertive"
+          >
+            <p class="font-display text-xs tracking-widest text-accent-coral">
+              // Lỗi tìm nước máy
+            </p>
+            <p class="mt-2 text-text-secondary">{{ aiSearchErrorMessage }}</p>
+            <div class="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                class="inline-flex items-center gap-1.5 border border-border-default bg-bg-elevated px-3 py-1.5 text-text-secondary transition hover:border-accent-coral hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                :disabled="aiRetryBusy"
+                @click="retryAiMove"
+              >
+                <Icon icon="lucide:refresh-cw" class="size-4 shrink-0" aria-hidden="true" />
+                Thử lại
+              </button>
+              <button
+                type="button"
+                class="inline-flex items-center gap-1.5 border border-border-default bg-bg-elevated px-3 py-1.5 text-text-secondary transition hover:border-accent-amber hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                :disabled="!canUndo"
+                @click="handleUndo"
+              >
+                <Icon icon="lucide:undo-2" class="size-4 shrink-0" aria-hidden="true" />
+                Hoàn nước
+              </button>
+            </div>
+          </div>
         </div>
 
         <div
@@ -1576,13 +1716,29 @@ function winnerDescription(winner: Side): string {
   height: min(2.25rem, calc(var(--vchess-cell) * 0.58));
 }
 
-/* Nước đi cuối: ô đi (amber) / ô đến (sky) — tách biệt màu với ô chiếu (coral). */
+/* Nước đi cuối: ô đi / ô đến — nền phẳng (kiểu highlight cờ truyền thống). */
 .vchess-last-move-from {
-  background: linear-gradient(135deg, rgba(255, 184, 48, 0.38) 0%, rgba(255, 184, 48, 0.14) 100%);
+  background: rgba(52, 211, 153, 0.32);
 }
 
 .vchess-last-move-to {
-  background: linear-gradient(135deg, rgba(56, 189, 248, 0.32) 0%, rgba(56, 189, 248, 0.12) 100%);
+  background: rgba(56, 189, 248, 0.38);
+}
+
+/* Sát thủ nhảy bắt — ô quân bị ăn (khác ô đích). */
+.vchess-last-move-assassin-victim {
+  background: rgba(255, 184, 48, 0.44);
+}
+
+/* Lật đại bàng: hai nửa màu ô đi / ô đích — cạnh cứng (không pha trộn). */
+.vchess-last-move-flip {
+  background: linear-gradient(
+    135deg,
+    rgba(52, 211, 153, 0.32) 0%,
+    rgba(52, 211, 153, 0.32) 50%,
+    rgba(56, 189, 248, 0.38) 50%,
+    rgba(56, 189, 248, 0.38) 100%
+  );
 }
 
 /* Ô vua bị chiếu — nền + nhấp nháy nhẹ để thu hút chú ý (accent coral). */
