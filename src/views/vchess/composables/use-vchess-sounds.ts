@@ -1,6 +1,7 @@
 import { useEventListener } from '@vueuse/core'
-import captureUrl from '../assets/sounds/capture.wav'
-import moveUrl from '../assets/sounds/move.wav'
+
+const moveUrl = '/vchess/sounds/move.wav'
+const captureUrl = '/vchess/sounds/capture.wav'
 
 /**
  * Âm nước đi: Web Audio API (buffer + AudioContext).
