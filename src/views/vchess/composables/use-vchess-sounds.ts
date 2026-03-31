@@ -49,10 +49,15 @@ export function useVchessSounds() {
   }
 
   function playForMoveType(type: 'move' | 'capture' | 'flip') {
+    // Phải gọi resume() đồng bộ trong cùng stack với tương tác (vd. click đi quân).
+    // Watcher history gọi hàm này ngay khi mutate state → vẫn nằm trong handler click.
+    // Nếu await trước rồi mới resume/start, gesture đã hết → không tiếng sau khi suy nghĩ lâu.
+    const c = getContext()
+    void c.resume()
+
     void (async () => {
       try {
         await ensureDecoded()
-        const c = getContext()
         const buffer = type === 'capture' ? captureBuffer : moveBuffer
         if (!buffer) return
         await c.resume()
